@@ -53,13 +53,13 @@ This tool implements multiple layers of protection to counter all known and theo
 
 1. Clone the repository:
 ```
-git clone https://github.com/username/ai-audio-fingerprint-remover.git
+git clone https://github.com/geeknik/ai-audio-fingerprint-remover.git
 cd ai-audio-fingerprint-remover
 ```
 
 2. Install dependencies:
 ```
-pip install numpy scipy librosa soundfile mutagen
+python3 -m venv venv && source venv/bin/activate && pip install numpy scipy librosa soundfile mutagen
 ```
 
 ## Usage
