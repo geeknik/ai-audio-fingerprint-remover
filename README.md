@@ -59,7 +59,7 @@ cd ai-audio-fingerprint-remover
 
 2. Install dependencies:
 ```
-python3 -m venv venv && source venv/bin/activate && pip install numpy scipy librosa soundfile mutagen
+python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
 ```
 
 ## Usage
