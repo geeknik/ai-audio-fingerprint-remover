@@ -782,12 +782,18 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
             processed_segments.append(stretched)
         
         # Reconstruct with overlap-add
-        result = np.zeros(len(audio))
+        reconstructed = np.zeros(len(result))
         for i, segment in enumerate(processed_segments):
             pos = i * hop_len
             # Apply triangular window for smooth crossfading
             window = np.bartlett(len(segment))
-            result[pos:pos+len(segment)] += segment * window
+            end_pos = min(pos + len(segment), len(reconstructed))
+            segment_len = end_pos - pos
+            if segment_len > 0:
+                reconstructed[pos:end_pos] += segment[:segment_len] * window[:segment_len]
+        
+        # Use the reconstructed result
+        result = reconstructed
     
     # 2. Handle distribution anomalies
     has_distribution_issues = any(p['type'] == 'perfect_distribution' for p in patterns)
