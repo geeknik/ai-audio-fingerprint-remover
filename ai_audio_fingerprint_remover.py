@@ -652,16 +652,38 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
         if high_norm > 1.0:
             continue
             
+        # Skip very low frequency filters that can cause numerical instability
+        if low_freq < 100:  # Skip filters below 100 Hz
+            continue
+            
         # Design filter with appropriate width
         width = min(0.1, (high_norm - low_norm) * 1.5)  # Ensure filter isn't too narrow
         
-        # Create a bandstop filter
-        b, a = signal.butter(4, [max(0.001, low_norm - width/2), 
-                                 min(0.999, high_norm + width/2)], 
-                             btype='bandstop')
+        # Calculate filter bounds with safety margins
+        low_bound = max(0.01, low_norm - width/2)  # Increased minimum from 0.001 to 0.01
+        high_bound = min(0.99, high_norm + width/2)  # Decreased maximum from 0.999 to 0.99
         
-        # Apply the filter
-        result = signal.filtfilt(b, a, result)
+        # Ensure valid filter bounds
+        if low_bound >= high_bound or (high_bound - low_bound) < 0.01:
+            continue
+        
+        try:
+            # Create a bandstop filter
+            b, a = signal.butter(4, [low_bound, high_bound], btype='bandstop')
+            
+            # Apply the filter with error checking
+            filtered = signal.filtfilt(b, a, result)
+            
+            # Check for numerical issues
+            if np.any(np.isnan(filtered)) or np.any(np.isinf(filtered)):
+                # Skip this filter if it produces invalid values
+                continue
+            
+            result = filtered
+            
+        except Exception:
+            # Skip this filter if it fails
+            continue
     
     # If we're removing high-frequency watermarks, add a small amount of noise
     # to defeat fingerprinting that relies on absence of higher frequencies
