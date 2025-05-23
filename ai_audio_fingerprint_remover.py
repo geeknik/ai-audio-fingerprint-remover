@@ -780,41 +780,6 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
         # Vary the noise level based on signal amplitude
         # (more noise where signal is louder - masked by the signal)
         amplitude_envelope = np.abs(result)
-        smoothed_envelope = signal.savgol_filter(amplitude_envelope, 2
-# Apply random time stretching to each segment
-        processed_segments = []
-        for segment in segments:
-            # Random stretch factor between 0.98 and 1.02 (±2%)
-            stretch_factor = 0.98 + 0.04 * random.random()
-            stretched = librosa.effects.time_stretch(segment, rate=stretch_factor)
-            
-            # Ensure consistent length
-            if len(stretched) > segment_len:
-                stretched = stretched[:segment_len]
-            elif len(stretched) < segment_len:
-                stretched = np.pad(stretched, (0, segment_len - len(stretched)))
-                
-            processed_segments.append(stretched)
-        
-        # Reconstruct with overlap-add
-        result = np.zeros(len(audio))
-        for i, segment in enumerate(processed_segments):
-            pos = i * hop_len
-            # Apply triangular window for smooth crossfading
-            window = np.bartlett(len(segment))
-            result[pos:pos+len(segment)] += segment * window
-    
-    # 2. Handle distribution anomalies
-    has_distribution_issues = any(p['type'] == 'perfect_distribution' for p in patterns)
-    
-    if has_distribution_issues:
-        # Add shaped noise to create more natural distribution
-        noise_level = 0.001  # Very subtle
-        noise = np.random.randn(len(result)) * noise_level
-        
-        # Vary the noise level based on signal amplitude
-        # (more noise where signal is louder - masked by the signal)
-        amplitude_envelope = np.abs(result)
         smoothed_envelope = signal.savgol_filter(amplitude_envelope, 
                                                max(5, min(101, len(result) // 1000) // 2 * 2 + 1), 2)
         shaped_noise = noise * smoothed_envelope
