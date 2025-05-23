@@ -39,6 +39,12 @@ try:
     import numpy as np
     from scipy import signal
     from scipy.io import wavfile
+    # Try to import windows from scipy.signal for newer versions
+    try:
+        from scipy.signal import windows
+    except ImportError:
+        # For older scipy versions, windows might not be separate
+        windows = None
 except ImportError:
     print("Error: Required 'numpy' and 'scipy' libraries not found.")
     print("Please install them using: pip install numpy scipy")
@@ -115,6 +121,20 @@ POTENTIAL_WATERMARK_FREQS = [
     [8000, 8500],    # Mid-range markers
     [12000, 12500]   # Secondary watermark range
 ]
+
+
+def get_hann_window(size: int) -> np.ndarray:
+    """Get a Hann window in a cross-compatible way across scipy versions."""
+    try:
+        # Try scipy.signal.windows.hann (newer versions)
+        if windows is not None:
+            return windows.hann(size)
+        else:
+            # Fallback to numpy.hanning for older versions
+            return np.hanning(size)
+    except:
+        # Final fallback to numpy.hanning
+        return np.hanning(size)
 
 
 @dataclass
@@ -941,7 +961,7 @@ def add_timing_variations(audio: np.ndarray, sr: int) -> np.ndarray:
     
     # Initialize output array
     result = np.zeros(len(audio))
-    window = signal.hann(segment_size)  # Hann window for smooth transitions
+    window = get_hann_window(segment_size)  # Hann window for smooth transitions
     
     # Process each segment with slight random variations
     for i in range(num_segments):
