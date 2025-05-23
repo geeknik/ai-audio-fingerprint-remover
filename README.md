@@ -83,7 +83,23 @@ python ai_audio_fingerprint_remover.py --directory input_folder output_folder
 
 ### Advanced Options
 
-**Aggressive Mode** (more thorough but may slightly affect quality):
+**Processing Intensity Levels** (adjusts the balance between effectiveness and audio quality):
+
+```bash
+# Gentle - minimal processing, preserves quality but may leave some fingerprints
+python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --level gentle
+
+# Moderate - balanced approach (default)
+python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --level moderate
+
+# Aggressive - thorough fingerprint removal with minimal quality impact
+python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --level aggressive
+
+# Extreme - maximum fingerprint removal, may introduce subtle artifacts
+python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --level extreme
+```
+
+**Legacy Aggressive Mode** (equivalent to --level aggressive):
 ```
 python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --aggressive
 ```

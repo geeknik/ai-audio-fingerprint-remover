@@ -138,6 +138,89 @@ def get_hann_window(size: int) -> np.ndarray:
 
 
 @dataclass
+class ProcessingConfig:
+    """Configuration parameters for different processing intensity levels."""
+    # Watermark removal parameters
+    filter_order: int = 4  # Order of bandstop filters
+    filter_width_multiplier: float = 1.5  # How wide to make the filter bands
+    noise_level: float = 0.001  # Level of noise added to high frequencies
+    skip_low_freq_threshold: int = 100  # Skip filters below this frequency
+    
+    # Pattern normalization parameters
+    timing_stretch_range: float = 0.02  # ±percentage for time stretching (0.02 = ±2%)
+    distribution_noise_level: float = 0.001  # Noise added for distribution normalization
+    harmonic_distortion_amount: float = 0.03  # Amount of soft clipping
+    phase_variance: float = 0.02  # Phase adjustment amount
+    micro_dynamics_amount: float = 0.005  # Micro-dynamics variation amount
+    
+    # Timing variations parameters
+    timing_variation_range: float = 0.01  # Random variation range (0.01 = ±1%)
+    segment_overlap_ratio: float = 0.5  # Overlap ratio for processing segments
+    
+    # General parameters
+    enable_watermark_removal: bool = True
+    enable_pattern_normalization: bool = True
+    enable_timing_variations: bool = True
+    enable_harmonic_adjustments: bool = True
+
+    @classmethod
+    def get_profile(cls, level: str) -> 'ProcessingConfig':
+        """Get predefined configuration profiles."""
+        profiles = {
+            'gentle': cls(
+                filter_order=2,
+                filter_width_multiplier=0.8,
+                noise_level=0.0005,
+                skip_low_freq_threshold=200,
+                timing_stretch_range=0.005,  # ±0.5%
+                distribution_noise_level=0.0005,
+                harmonic_distortion_amount=0.01,
+                phase_variance=0.01,
+                micro_dynamics_amount=0.002,
+                timing_variation_range=0.005,  # ±0.5%
+                enable_harmonic_adjustments=False,  # Skip most aggressive processing
+            ),
+            'moderate': cls(
+                filter_order=3,
+                filter_width_multiplier=1.2,
+                noise_level=0.0008,
+                skip_low_freq_threshold=150,
+                timing_stretch_range=0.015,  # ±1.5%
+                distribution_noise_level=0.0008,
+                harmonic_distortion_amount=0.02,
+                phase_variance=0.015,
+                micro_dynamics_amount=0.003,
+                timing_variation_range=0.008,  # ±0.8%
+            ),
+            'aggressive': cls(
+                filter_order=4,
+                filter_width_multiplier=1.5,
+                noise_level=0.001,
+                skip_low_freq_threshold=100,
+                timing_stretch_range=0.02,  # ±2%
+                distribution_noise_level=0.001,
+                harmonic_distortion_amount=0.03,
+                phase_variance=0.02,
+                micro_dynamics_amount=0.005,
+                timing_variation_range=0.01,  # ±1%
+            ),
+            'extreme': cls(
+                filter_order=6,
+                filter_width_multiplier=2.0,
+                noise_level=0.002,
+                skip_low_freq_threshold=50,
+                timing_stretch_range=0.04,  # ±4%
+                distribution_noise_level=0.002,
+                harmonic_distortion_amount=0.05,
+                phase_variance=0.03,
+                micro_dynamics_amount=0.008,
+                timing_variation_range=0.02,  # ±2%
+            )
+        }
+        
+        return profiles.get(level, profiles['moderate'])
+
+@dataclass
 class ProcessingStats:
     """Track statistics about the audio processing."""
     files_processed: int = 0
@@ -145,6 +228,7 @@ class ProcessingStats:
     watermarks_detected: int = 0
     patterns_normalized: int = 0
     timing_adjustments: int = 0
+    processing_level: str = "moderate"
     
     def __post_init__(self):
         if self.metadata_removed is None:
@@ -154,8 +238,8 @@ class ProcessingStats:
 class AudioFingerprint:
     """Detector for known audio fingerprinting techniques."""
     
-    def __init__(self, aggressive: bool = False):
-        self.aggressive = aggressive
+    def __init__(self, config: ProcessingConfig):
+        self.config = config
         self.log_details = []
     
     def detect_spectral_watermarks(self, audio_data: np.ndarray, sample_rate: int) -> List[Dict[str, Any]]:
@@ -620,9 +704,9 @@ def remove_spectral_watermarks(audio_path: str, output_path: str,
         
         # Process each channel separately
         for i in range(y.shape[0]):
-            processed[i] = apply_watermark_removal(y[i], sr, watermarks)
+            processed[i] = apply_watermark_removal(y[i], sr, watermarks, detector.config)
     else:
-        processed = apply_watermark_removal(y, sr, watermarks)
+        processed = apply_watermark_removal(y, sr, watermarks, detector.config)
     
     # Save the processed audio
     sf.write(output_path, processed.T if is_stereo else processed, sr)
@@ -631,8 +715,12 @@ def remove_spectral_watermarks(audio_path: str, output_path: str,
 
 
 def apply_watermark_removal(audio: np.ndarray, sr: int, 
-                           watermarks: List[Dict[str, Any]]) -> np.ndarray:
+                           watermarks: List[Dict[str, Any]], 
+                           config: ProcessingConfig) -> np.ndarray:
     """Apply filters to remove detected watermarks."""
+    if not config.enable_watermark_removal:
+        return audio
+        
     result = audio.copy()
     
     for watermark in watermarks:
@@ -653,23 +741,23 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
             continue
             
         # Skip very low frequency filters that can cause numerical instability
-        if low_freq < 100:  # Skip filters below 100 Hz
+        if low_freq < config.skip_low_freq_threshold:
             continue
             
         # Design filter with appropriate width
-        width = min(0.1, (high_norm - low_norm) * 1.5)  # Ensure filter isn't too narrow
+        width = min(0.1, (high_norm - low_norm) * config.filter_width_multiplier)
         
         # Calculate filter bounds with safety margins
-        low_bound = max(0.01, low_norm - width/2)  # Increased minimum from 0.001 to 0.01
-        high_bound = min(0.99, high_norm + width/2)  # Decreased maximum from 0.999 to 0.99
+        low_bound = max(0.01, low_norm - width/2)
+        high_bound = min(0.99, high_norm + width/2)
         
         # Ensure valid filter bounds
         if low_bound >= high_bound or (high_bound - low_bound) < 0.01:
             continue
         
         try:
-            # Create a bandstop filter
-            b, a = signal.butter(4, [low_bound, high_bound], btype='bandstop')
+            # Create a bandstop filter with configurable order
+            b, a = signal.butter(config.filter_order, [low_bound, high_bound], btype='bandstop')
             
             # Apply the filter with error checking
             filtered = signal.filtfilt(b, a, result)
@@ -691,8 +779,7 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
     
     if high_watermarks:
         # Generate a small amount of shaped noise
-        noise_level = 0.001  # Very subtle
-        noise = np.random.randn(len(result)) * noise_level
+        noise = np.random.randn(len(result)) * config.noise_level
         
         # Shape the noise to only affect high frequencies
         nyquist = sr / 2
@@ -755,10 +842,10 @@ def normalize_ai_patterns(audio_path: str, output_path: str,
             # Add small phase differences between channels
             phase_var = 0.02 if i == 0 else -0.02
             processed[i] = apply_pattern_normalization(
-                y[i], sr, patterns, timing_issues, phase_var=phase_var
+                y[i], sr, patterns, timing_issues, detector.config, phase_var=phase_var
             )
     else:
-        processed = apply_pattern_normalization(y, sr, patterns, timing_issues)
+        processed = apply_pattern_normalization(y, sr, patterns, timing_issues, detector.config)
     
     # Save the processed audio
     sf.write(output_path, processed.T if is_stereo else processed, sr)
@@ -769,8 +856,12 @@ def normalize_ai_patterns(audio_path: str, output_path: str,
 def apply_pattern_normalization(audio: np.ndarray, sr: int, 
                                patterns: List[Dict[str, Any]], 
                                timing_issues: List[Dict[str, Any]],
+                               config: ProcessingConfig,
                                phase_var: float = 0) -> np.ndarray:
     """Apply corrections to normalize detected AI patterns."""
+    if not config.enable_pattern_normalization:
+        return audio
+        
     result = audio.copy()
     
     # 1. Address timing issues
@@ -781,7 +872,7 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
         # Apply subtle time-domain variations
         # This stretches and compresses small segments randomly
         segment_len = sr // 10  # ~100ms segments
-        hop_len = segment_len // 2
+        hop_len = int(segment_len * config.segment_overlap_ratio)
         
         # Break into segments
         segments = []
@@ -791,8 +882,9 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
         # Apply random time stretching to each segment
         processed_segments = []
         for segment in segments:
-            # Random stretch factor between 0.98 and 1.02 (±2%)
-            stretch_factor = 0.98 + 0.04 * random.random()
+            # Random stretch factor based on config
+            stretch_range = config.timing_stretch_range
+            stretch_factor = (1.0 - stretch_range) + (2 * stretch_range * random.random())
             stretched = librosa.effects.time_stretch(segment, rate=stretch_factor)
             
             # Ensure consistent length
@@ -822,8 +914,7 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
     
     if has_distribution_issues:
         # Add shaped noise to create more natural distribution
-        noise_level = 0.001  # Very subtle
-        noise = np.random.randn(len(result)) * noise_level
+        noise = np.random.randn(len(result)) * config.distribution_noise_level
         
         # Vary the noise level based on signal amplitude
         # (more noise where signal is louder - masked by the signal)
@@ -839,12 +930,12 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
     has_harmonic_issues = any(p['type'] in ['missing_harmonics', 'too_perfect_harmonics'] 
                               for p in patterns)
     
-    if has_harmonic_issues:
+    if has_harmonic_issues and config.enable_harmonic_adjustments:
         # Apply subtle harmonic distortion to create more natural harmonic relationships
         # This simulates the tiny non-linearities in analog equipment
         
         # Non-linear waveshaping function (subtle soft clipping)
-        def soft_clip(x, amount=0.03):
+        def soft_clip(x, amount=config.harmonic_distortion_amount):
             return x - amount * np.sin(2 * np.pi * x)
         
         # Apply the non-linearity
@@ -855,7 +946,7 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
             # Create an all-pass filter for phase adjustment
             # This changes phase without changing amplitude
             b, a = signal.butter(2, 0.5, 'highpass')
-            phase_adjustment = signal.lfilter(b, a, result) * phase_var
+            phase_adjustment = signal.lfilter(b, a, result) * (phase_var * config.phase_variance)
             result += phase_adjustment
     
     # 4. Add a touch of natural micro-dynamics
@@ -865,7 +956,7 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
                                   max(5, min(101, len(result) // 500) // 2 * 2 + 1), 2)
     
     # Create subtle volume variations
-    variations = np.sin(np.linspace(0, 20 * np.pi, len(result)) + random.random() * 10) * 0.005
+    variations = np.sin(np.linspace(0, 20 * np.pi, len(result)) + random.random() * 10) * config.micro_dynamics_amount
     dynamics_adjustment = smoothed * variations
     
     # Apply the adjustment
@@ -880,7 +971,7 @@ def apply_pattern_normalization(audio: np.ndarray, sr: int,
 
 
 def process_audio(input_path: str, output_path: Optional[str] = None, 
-                 aggressive: bool = False) -> Tuple[str, ProcessingStats]:
+                 aggressive: bool = False, level: str = None) -> Tuple[str, ProcessingStats]:
     """
     Process an audio file to remove all AI fingerprinting.
     
@@ -890,8 +981,14 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
     3. Normalize statistical patterns
     4. Add human-like variations
     """
+    # Determine processing level
+    if level is None:
+        level = "aggressive" if aggressive else "moderate"
+    
+    config = ProcessingConfig.get_profile(level)
     stats = ProcessingStats()
-    detector = AudioFingerprint(aggressive=aggressive)
+    stats.processing_level = level
+    detector = AudioFingerprint(config=config)
     
     # Create temporary processing directory
     temp_dir = tempfile.mkdtemp()
@@ -935,9 +1032,9 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
             if is_stereo:
                 processed = np.zeros_like(y)
                 for i in range(y.shape[0]):
-                    processed[i] = add_timing_variations(y[i], sr)
+                    processed[i] = add_timing_variations(y[i], sr, config)
             else:
-                processed = add_timing_variations(y, sr)
+                processed = add_timing_variations(y, sr, config)
                 
             # Save to final output location
             sf.write(output_path, processed.T if is_stereo else processed, sr)
@@ -970,15 +1067,18 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
             pass
 
 
-def add_timing_variations(audio: np.ndarray, sr: int) -> np.ndarray:
+def add_timing_variations(audio: np.ndarray, sr: int, config: ProcessingConfig) -> np.ndarray:
     """Add subtle timing variations to make AI-generated audio sound more natural."""
+    if not config.enable_timing_variations:
+        return audio
+        
     # Only apply if audio is long enough
     if len(audio) < sr:  # Less than 1 second
         return audio
         
     # Parameters for variation
     segment_size = sr // 4  # ~250ms segments
-    overlap = segment_size // 2
+    overlap = int(segment_size * config.segment_overlap_ratio)
     
     # Calculate number of segments
     num_segments = (len(audio) - segment_size) // overlap + 1
@@ -996,9 +1096,9 @@ def add_timing_variations(audio: np.ndarray, sr: int) -> np.ndarray:
         start = i * overlap
         segment = audio[start:start+segment_size].copy()
         
-        # Random micro-timing adjustment
-        # Tiny random pitch shifts create natural-sounding variations
-        random_var = 0.99 + 0.02 * random.random()  # Between 0.99 and 1.01
+        # Random micro-timing adjustment based on config
+        variation_range = config.timing_variation_range
+        random_var = (1.0 - variation_range) + (2 * variation_range * random.random())
         
         # Apply subtle pitch shift (which affects timing)
         # Using a simple resampling approach for speed
@@ -1019,10 +1119,15 @@ def add_timing_variations(audio: np.ndarray, sr: int) -> np.ndarray:
 
 
 def process_directory(input_dir: str, output_dir: Optional[str] = None,
-                     aggressive: bool = False) -> Tuple[List[str], ProcessingStats]:
+                     aggressive: bool = False, level: str = None) -> Tuple[List[str], ProcessingStats]:
     """Process all audio files in a directory to remove AI fingerprinting."""
     processed_files = []
     stats = ProcessingStats()
+    
+    # Determine processing level
+    if level is None:
+        level = "aggressive" if aggressive else "moderate"
+    stats.processing_level = level
     
     # Create output directory if it doesn't exist
     if output_dir and not os.path.exists(output_dir):
@@ -1047,7 +1152,7 @@ def process_directory(input_dir: str, output_dir: Optional[str] = None,
                 
                 # Process the file
                 try:
-                    result, file_stats = process_audio(input_path, output_path, aggressive)
+                    result, file_stats = process_audio(input_path, output_path, aggressive, level)
                     processed_files.append(result)
                     
                     # Accumulate statistics
@@ -1208,7 +1313,8 @@ def main():
         - Timing pattern randomization
         - Frequency distribution normalization
         - Adds subtle human-like imperfections
-        """
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     group = parser.add_mutually_exclusive_group(required=True)
@@ -1217,8 +1323,14 @@ def main():
     
     parser.add_argument("output", nargs="?", help="Output file or directory (optional)")
     parser.add_argument("--show", action="store_true", help="Show metadata before removal")
-    parser.add_argument("--aggressive", action="store_true", 
-                      help="Use aggressive mode (more thorough but may affect quality)")
+    
+    # Processing intensity options
+    intensity_group = parser.add_mutually_exclusive_group()
+    intensity_group.add_argument("--level", choices=['gentle', 'moderate', 'aggressive', 'extreme'],
+                                help="Processing intensity level (default: moderate)")
+    intensity_group.add_argument("--aggressive", action="store_true", 
+                                help="Use aggressive mode (equivalent to --level aggressive)")
+    
     parser.add_argument("--verify", action="store_true", 
                       help="Verify results by comparing with original")
     parser.add_argument("--report", action="store_true", 
@@ -1228,6 +1340,18 @@ def main():
     
     print("\nAI Audio Fingerprint Remover")
     print("=" * 40)
+    
+    # Show processing level information if requested
+    if args.level or args.aggressive:
+        level = args.level or ("aggressive" if args.aggressive else "moderate")
+        level_descriptions = {
+            'gentle': 'Minimal processing - reduces artifacts but may leave some fingerprints',
+            'moderate': 'Balanced processing - good compromise between effectiveness and quality',
+            'aggressive': 'Thorough processing - removes most fingerprints with minimal quality impact',
+            'extreme': 'Maximum processing - removes all detectable fingerprints but may affect quality'
+        }
+        print(f"Processing level: {level} - {level_descriptions.get(level, 'Unknown level')}")
+        print()
     
     # Process single file
     if args.input:
@@ -1239,9 +1363,10 @@ def main():
             before_metadata = display_metadata(args.input)
         
         print(f"\nProcessing {args.input}...")
-        result, stats = process_audio(args.input, args.output, args.aggressive)
+        result, stats = process_audio(args.input, args.output, args.aggressive, args.level)
         
         print(f"\nResults:")
+        print(f"  Processing level: {stats.processing_level}")
         print(f"  Files processed: {stats.files_processed}")
         print(f"  Watermarks detected and removed: {stats.watermarks_detected}")
         print(f"  Statistical patterns normalized: {stats.patterns_normalized}")
@@ -1281,9 +1406,10 @@ def main():
             return 1
         
         print(f"\nProcessing all audio files in {args.directory}...")
-        processed, stats = process_directory(args.directory, args.output, args.aggressive)
+        processed, stats = process_directory(args.directory, args.output, args.aggressive, args.level)
         
         print(f"\nResults:")
+        print(f"  Processing level: {stats.processing_level}")
         print(f"  Files processed: {stats.files_processed}")
         print(f"  Watermarks detected and removed: {stats.watermarks_detected}")
         print(f"  Statistical patterns normalized: {stats.patterns_normalized}")
