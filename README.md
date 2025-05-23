@@ -124,10 +124,13 @@ python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --verify
 ```
 AI Audio Fingerprint Remover
 ========================================
+Processing level: extreme - Maximum processing - removes all detectable fingerprints but may affect quality
+
 
 Processing _A Hack Song (Glitchy)_.wav...
 
 Results:
+  Processing level: extreme
   Files processed: 1
   Watermarks detected and removed: 5
   Statistical patterns normalized: 1
@@ -138,7 +141,7 @@ Metadata removed:
 
 Verification:
   Original file hash: 511194868d6287c54123b0ace467b321f504f99088d02499915a1fbbf9c63930
-  Processed file hash: 59bf72cb84060368c3d7a905bca80a4d582a2406fe5170aab261fa3a5a71d550
+  Processed file hash: 400cf80b63d1238b373b5a35db2fc6ffd4c34740adaac901989ae7a7b311b149
   Files are different
 
 Processing complete.
