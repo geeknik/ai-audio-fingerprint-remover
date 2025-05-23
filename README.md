@@ -109,20 +109,21 @@ python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --verify
 AI Audio Fingerprint Remover
 ========================================
 
-Processing input.mp3...
+Processing _A Hack Song (Glitchy)_.wav...
 
 Results:
   Files processed: 1
-  Watermarks detected and removed: 2
-  Statistical patterns normalized: 3
+  Watermarks detected and removed: 5
+  Statistical patterns normalized: 1
   Timing adjustments applied: 1
 
 Metadata removed:
-  mp3_id3: 5 items
-    - TXXX: [AI Model: Suno v3]
-    - COMM: [Generated with AI]
-    - TSSE: [AI Audio Framework v1.2]
-    - ... and 2 more
+  wav_rewrite: 1 items
+
+Verification:
+  Original file hash: 511194868d6287c54123b0ace467b321f504f99088d02499915a1fbbf9c63930
+  Processed file hash: 59bf72cb84060368c3d7a905bca80a4d582a2406fe5170aab261fa3a5a71d550
+  Files are different
 
 Processing complete.
 ```
