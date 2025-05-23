@@ -3,7 +3,7 @@
 A comprehensive Python tool to remove AI-generated fingerprints, watermarks, and metadata from audio files.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.7%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 
 ## Overview
 
@@ -14,30 +14,35 @@ This tool implements multiple layers of protection to counter all known and theo
 ## Features
 
 ### Complete Metadata Removal
+
 - Strips all standard metadata (ID3, RIFF INFO, FLAC tags)
 - Removes AI-specific tags and custom chunks
 - Eliminates hidden identifiers in binary data
 - Supports multiple formats: MP3, WAV, FLAC, AIFF
 
 ### Spectral Watermark Detection & Elimination
+
 - Identifies and removes high-frequency watermarks
 - Detects periodic patterns in specific frequency bands
 - Applies targeted filters to neutralize watermarks
 - Adds naturalistic noise to defeat absence-based fingerprinting
 
 ### Statistical Pattern Normalization
+
 - Detects and corrects machine-like timing patterns
 - Identifies unnatural amplitude distributions
 - Normalizes frequency distributions
 - Adds realistic micro-variations in timing
 
 ### Human-Like Imperfections
+
 - Introduces subtle non-linearities in harmonics
 - Adds realistic micro-dynamics
 - Creates natural stereo imaging variations
 - Applies minor phase adjustments
 
 ### Robust Verification
+
 - Provides detailed reports of modifications
 - Offers before/after metadata comparison
 - Verifies effectiveness through hash comparison
@@ -46,18 +51,21 @@ This tool implements multiple layers of protection to counter all known and theo
 ## Installation
 
 ### Requirements
+
 - Python 3.7+
 - Required libraries: numpy, scipy, librosa, soundfile, mutagen
 
 ### Setup
 
 1. Clone the repository:
+
 ```
 git clone https://github.com/geeknik/ai-audio-fingerprint-remover.git
 cd ai-audio-fingerprint-remover
 ```
 
 2. Install dependencies:
+
 ```
 python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
 ```
@@ -67,16 +75,19 @@ python3 -m venv venv && source venv/bin/activate && pip install -r requirements.
 ### Basic Usage
 
 **Process a single file:**
+
 ```
 python ai_audio_fingerprint_remover.py input.mp3 output.mp3
 ```
 
 **Process a file in-place:**
+
 ```
 python ai_audio_fingerprint_remover.py input.wav
 ```
 
 **Process all audio files in a directory:**
+
 ```
 python ai_audio_fingerprint_remover.py --directory input_folder output_folder
 ```
@@ -100,21 +111,25 @@ python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --level extreme
 ```
 
 **Legacy Aggressive Mode** (equivalent to --level aggressive):
+
 ```
 python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --aggressive
 ```
 
 **View Metadata Before Removal:**
+
 ```
 python ai_audio_fingerprint_remover.py --show input.wav output.wav
 ```
 
 **Generate Detailed Report:**
+
 ```
 python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --report
 ```
 
 **Verify Results:**
+
 ```
 python ai_audio_fingerprint_remover.py input.mp3 output.mp3 --verify
 ```

@@ -42,6 +42,11 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
 
 try:
+    import psutil
+except ImportError:
+    psutil = None
+
+try:
     import numpy as np
     from scipy import signal, stats
     from scipy.io import wavfile
@@ -87,6 +92,175 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class AudioProcessor:
+    """High-performance audio processor with chunked processing capabilities."""
+    
+    def __init__(self, config: 'ProcessingConfig'):
+        self.config = config
+        self.chunk_size = 30  # Process in 30-second chunks for large files
+        self.overlap_size = 2  # 2-second overlap between chunks
+        
+    def process_large_audio_chunked(self, audio: np.ndarray, sr: int, 
+                                   process_func, *args, **kwargs) -> np.ndarray:
+        """Process large audio files in chunks to manage memory usage."""
+        if len(audio) < sr * 60:  # Less than 1 minute, process normally
+            return process_func(audio, sr, *args, **kwargs)
+        
+        chunk_samples = int(self.chunk_size * sr)
+        overlap_samples = int(self.overlap_size * sr)
+        hop_size = chunk_samples - overlap_samples
+        
+        processed_chunks = []
+        total_chunks = (len(audio) - overlap_samples) // hop_size + 1
+        
+        logger.info(f"Processing large audio in {total_chunks} chunks of {self.chunk_size}s each")
+        
+        for i in range(total_chunks):
+            start_idx = i * hop_size
+            end_idx = min(start_idx + chunk_samples, len(audio))
+            
+            chunk = audio[start_idx:end_idx]
+            
+            if len(chunk) < sr:  # Skip very small chunks
+                continue
+                
+            try:
+                # Process the chunk
+                processed_chunk = process_func(chunk, sr, *args, **kwargs)
+                
+                # Apply fade in/out to avoid clicks at chunk boundaries
+                if i > 0:  # Not the first chunk
+                    fade_samples = min(overlap_samples // 2, len(processed_chunk))
+                    fade_in = np.linspace(0, 1, fade_samples)
+                    processed_chunk[:fade_samples] *= fade_in
+                
+                if i < total_chunks - 1:  # Not the last chunk
+                    fade_samples = min(overlap_samples // 2, len(processed_chunk))
+                    fade_out = np.linspace(1, 0, fade_samples)
+                    processed_chunk[-fade_samples:] *= fade_out
+                
+                processed_chunks.append(processed_chunk)
+                
+            except Exception as e:
+                logger.warning(f"Error processing chunk {i+1}/{total_chunks}: {e}")
+                # Use original chunk if processing fails
+                processed_chunks.append(chunk)
+        
+        if not processed_chunks:
+            logger.warning("No chunks were successfully processed")
+            return audio
+        
+        # Reconstruct the full audio with proper overlap handling
+        return self._reconstruct_from_chunks(processed_chunks, hop_size, overlap_samples)
+    
+    def _reconstruct_from_chunks(self, chunks: List[np.ndarray], 
+                                hop_size: int, overlap_samples: int) -> np.ndarray:
+        """Reconstruct audio from overlapping chunks using cross-fade."""
+        if not chunks:
+            return np.array([])
+        
+        total_length = (len(chunks) - 1) * hop_size + len(chunks[-1])
+        result = np.zeros(total_length)
+        
+        for i, chunk in enumerate(chunks):
+            start_idx = i * hop_size
+            end_idx = start_idx + len(chunk)
+            
+            if i == 0:
+                # First chunk - no overlap
+                result[start_idx:end_idx] = chunk
+            else:
+                # Overlapping chunks - use cross-fade
+                overlap_start = start_idx
+                overlap_end = min(overlap_start + overlap_samples, end_idx, len(result))
+                
+                if overlap_end > overlap_start:
+                    # Cross-fade in the overlap region
+                    overlap_len = overlap_end - overlap_start
+                    fade_out = np.linspace(1, 0, overlap_len)
+                    fade_in = np.linspace(0, 1, overlap_len)
+                    
+                    chunk_overlap_end = min(overlap_len, len(chunk))
+                    result[overlap_start:overlap_start + chunk_overlap_end] *= fade_out[:chunk_overlap_end]
+                    result[overlap_start:overlap_start + chunk_overlap_end] += chunk[:chunk_overlap_end] * fade_in[:chunk_overlap_end]
+                
+                # Add the non-overlapping part
+                if overlap_end < end_idx:
+                    non_overlap_start = overlap_len
+                    result[overlap_end:end_idx] = chunk[non_overlap_start:non_overlap_start + (end_idx - overlap_end)]
+        
+        return result
+    
+    def adaptive_filter_design(self, audio: np.ndarray, sr: int, 
+                              freq_range: List[float]) -> Tuple[np.ndarray, np.ndarray]:
+        """Design adaptive filters based on audio characteristics."""
+        # Analyze the audio to determine optimal filter parameters
+        freq_analysis = AdvancedAudioAnalysis.analyze_frequency_distribution(audio, sr)
+        
+        # Adapt filter order based on spectral complexity
+        if freq_analysis['spectral_spread'] > sr / 8:
+            # High spectral spread - use higher order filter
+            filter_order = min(8, self.config.filter_order + 2)
+        else:
+            # Low spectral spread - standard order is fine
+            filter_order = self.config.filter_order
+        
+        # Adapt filter bandwidth based on spectral characteristics
+        base_width = (freq_range[1] - freq_range[0]) / (sr / 2)
+        
+        if freq_analysis['spectral_kurtosis'] > 5:
+            # High kurtosis (peaky spectrum) - narrower filter
+            width = base_width * 0.8
+        else:
+            # Normal or flat spectrum - standard width
+            width = base_width * self.config.filter_width_multiplier
+        
+        # Calculate adaptive bounds
+        center_freq = (freq_range[0] + freq_range[1]) / 2 / (sr / 2)
+        low_bound = max(0.01, center_freq - width/2)
+        high_bound = min(0.99, center_freq + width/2)
+        
+        try:
+            b, a = signal.butter(filter_order, [low_bound, high_bound], btype='bandstop')
+            return b, a
+        except Exception as e:
+            logger.warning(f"Adaptive filter design failed: {e}")
+            # Fallback to standard design
+            return signal.butter(self.config.filter_order, [low_bound, high_bound], btype='bandstop')
+    
+    def perceptual_masking_filter(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Apply perceptually-motivated processing to preserve audio quality."""
+        try:
+            # Calculate psychoacoustic masking threshold
+            stft = librosa.stft(audio, n_fft=2048, hop_length=512)
+            magnitude = np.abs(stft)
+            
+            # Rough approximation of masking threshold using spectral envelope
+            masking_threshold = np.percentile(magnitude, 10, axis=1, keepdims=True)
+            
+            # Only process frequencies where modifications won't be perceptible
+            safe_modification_mask = magnitude > masking_threshold * 3
+            
+            # Apply gentle modifications only where they're masked
+            modified_stft = stft.copy()
+            noise_level = self.config.noise_level * 0.5  # Reduced noise for perceptual masking
+            
+            for freq_idx in range(stft.shape[0]):
+                for time_idx in range(stft.shape[1]):
+                    if safe_modification_mask[freq_idx, time_idx]:
+                        # Add small amount of noise only where it's perceptually masked
+                        noise = np.random.randn() * noise_level * magnitude[freq_idx, time_idx]
+                        modified_stft[freq_idx, time_idx] += noise
+            
+            # Convert back to time domain
+            return librosa.istft(modified_stft, hop_length=512)
+        
+        except Exception as e:
+            logger.warning(f"Perceptual masking failed: {e}")
+            return audio
+
 
 # Constants
 KNOWN_AI_TAG_PATTERNS = [
@@ -421,10 +595,20 @@ class ProcessingStats:
     patterns_normalized: int = 0
     timing_adjustments: int = 0
     processing_level: str = "moderate"
+    processing_time: float = 0.0
+    memory_peak_mb: float = 0.0
+    chunks_processed: int = 0
+    cache_hits: int = 0
     
     def __post_init__(self):
         if self.metadata_removed is None:
             self.metadata_removed = {}
+    
+    def add_timing(self, operation: str, duration: float):
+        """Add timing information for performance monitoring."""
+        if not hasattr(self, 'operation_timings'):
+            self.operation_timings = {}
+        self.operation_timings[operation] = duration
 
 
 class AudioFingerprint:
@@ -434,6 +618,8 @@ class AudioFingerprint:
         self.config = config
         self.log_details = []
         self.analysis = AdvancedAudioAnalysis()
+        self.processor = AudioProcessor(config)
+        self._cache = {}  # Cache for expensive computations
     
     def detect_spectral_watermarks(self, audio_data: np.ndarray, sample_rate: int) -> List[Dict[str, Any]]:
         """Detect potential spectral watermarks in the audio using advanced analysis."""
@@ -444,6 +630,13 @@ class AudioFingerprint:
             logger.warning("Empty audio data provided to watermark detection")
             return detected
         
+        # Check cache first
+        audio_hash = hashlib.md5(audio_data.tobytes()).hexdigest()[:16]
+        cache_key = f"watermarks_{audio_hash}_{sample_rate}"
+        if cache_key in self._cache:
+            logger.debug("Using cached watermark detection results")
+            return self._cache[cache_key]
+        
         try:
             # Convert to mono if stereo
             if len(audio_data.shape) > 1:
@@ -453,13 +646,23 @@ class AudioFingerprint:
             
             logger.info(f"Analyzing {len(audio_mono)} samples at {sample_rate} Hz")
             
-            # Enhanced spectral analysis with better time-frequency resolution
-            nperseg = min(4096, len(audio_mono) // 8)  # Adaptive window size
+            # For very large files, downsample for initial analysis
+            if len(audio_mono) > sample_rate * 300:  # > 5 minutes
+                logger.info("Large file detected - using decimated analysis")
+                decimation_factor = max(1, len(audio_mono) // (sample_rate * 120))  # Target ~2 minutes
+                audio_analysis = audio_mono[::decimation_factor]
+                analysis_sr = sample_rate // decimation_factor
+            else:
+                audio_analysis = audio_mono
+                analysis_sr = sample_rate
+            
+            # Enhanced spectral analysis with adaptive parameters
+            nperseg = min(4096, max(512, len(audio_analysis) // 16))  # Adaptive window size
             noverlap = nperseg // 2
             
             freqs, times, spectrogram = signal.spectrogram(
-                audio_mono, 
-                fs=sample_rate,
+                audio_analysis, 
+                fs=analysis_sr,
                 window='hann',
                 nperseg=nperseg,
                 noverlap=noverlap,
@@ -467,17 +670,17 @@ class AudioFingerprint:
             )
             
             # Calculate spectral entropy to detect artificial patterns
-            entropy = self.analysis.calculate_spectral_entropy(audio_mono, sample_rate)
+            entropy = self.analysis.calculate_spectral_entropy(audio_analysis, analysis_sr)
             
             # Advanced frequency distribution analysis
-            freq_stats = self.analysis.analyze_frequency_distribution(audio_mono, sample_rate)
+            freq_stats = self.analysis.analyze_frequency_distribution(audio_analysis, analysis_sr)
             
             # Detect anomalies in high-frequency energy (common watermark location)
             if freq_stats['high_freq_energy_ratio'] > 0.1:  # Unusually high energy in high frequencies
                 detected.append({
                     'type': 'high_freq_anomaly',
                     'energy_ratio': freq_stats['high_freq_energy_ratio'],
-                    'freq_range': [0.8 * sample_rate / 2, sample_rate / 2],
+                    'freq_range': [0.8 * analysis_sr / 2, analysis_sr / 2],
                     'confidence': min(freq_stats['high_freq_energy_ratio'] * 10, 1.0)
                 })
             
@@ -497,11 +700,13 @@ class AudioFingerprint:
             
             # Look for anomalies in frequency bands commonly used for watermarking
             for freq_range in POTENTIAL_WATERMARK_FREQS:
-                if freq_range[1] > sample_rate / 2:
+                # Scale frequency range for analysis sample rate
+                scaled_freq_range = [f * analysis_sr / sample_rate for f in freq_range]
+                if scaled_freq_range[1] > analysis_sr / 2:
                     continue  # Skip if beyond Nyquist frequency
                     
-                # Find the indices for our frequency range
-                freq_mask = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
+                # Find the indices for our scaled frequency range
+                freq_mask = (freqs >= scaled_freq_range[0]) & (freqs <= scaled_freq_range[1])
                 if not np.any(freq_mask):
                     continue
                     
@@ -521,17 +726,19 @@ class AudioFingerprint:
                     if len(autocorr) > 1:
                         peaks, _ = signal.find_peaks(autocorr, height=0.5, distance=5)
                         if len(peaks) >= 3:  # At least 3 regular peaks suggests a pattern
+                            # Scale back to original frequency range
+                            original_freq_range = freq_range
                             detected.append({
-                                'freq_range': freq_range,
+                                'freq_range': original_freq_range,
                                 'peak_count': len(peaks),
                                 'regularity': np.std(np.diff(peaks)),
                                 'strength': np.max(autocorr[peaks])
                             })
                             
                 # Also check for constant energy in bands where human audio would vary
-                if freq_range[0] > 15000 and np.std(band_energy) / (mean_energy + 1e-10) < 0.1:
+                if scaled_freq_range[0] > 15000 * analysis_sr / sample_rate and np.std(band_energy) / (mean_energy + 1e-10) < 0.1:
                     detected.append({
-                        'freq_range': freq_range,
+                        'freq_range': freq_range,  # Use original frequency range
                         'type': 'constant_energy',
                         'variation': np.std(band_energy) / (mean_energy + 1e-10)
                     })
@@ -539,6 +746,9 @@ class AudioFingerprint:
         except Exception as e:
             logger.error(f"Spectral watermark detection failed: {e}")
             
+        # Cache the results for future use
+        self._cache[cache_key] = detected
+        
         return detected
         
     def detect_statistical_patterns(self, audio_data: np.ndarray) -> List[Dict[str, Any]]:
@@ -848,7 +1058,7 @@ def clean_metadata_comprehensive(filepath: str, output_path: Optional[str] = Non
                 
                 # Track and remove FLAC metadata
                 if audio.tags:
-                    for key in list(audio.keys()):
+                    for key in list(audio.tags.keys()):
                         removed.append(f"{key}: {audio[key]}")
                     
                     audio.delete()
@@ -991,13 +1201,18 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
         return audio
         
     result = audio.copy()
+    processor = AudioProcessor(config)
     
+    # Group watermarks by frequency range to optimize filtering
+    freq_ranges = []
     for watermark in watermarks:
         freq_range = watermark.get('freq_range')
-        if not freq_range:
-            continue
-            
-        # Design a band-reject filter for this frequency range
+        if freq_range and freq_range not in freq_ranges:
+            freq_ranges.append(freq_range)
+    
+    logger.debug(f"Applying filters for {len(freq_ranges)} frequency ranges")
+    
+    for freq_range in freq_ranges:
         low_freq, high_freq = freq_range
         
         # Convert to normalized frequency
@@ -1013,33 +1228,23 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
         if low_freq < config.skip_low_freq_threshold:
             continue
             
-        # Design filter with appropriate width
-        width = min(0.1, (high_norm - low_norm) * config.filter_width_multiplier)
-        
-        # Calculate filter bounds with safety margins
-        low_bound = max(0.01, low_norm - width/2)
-        high_bound = min(0.99, high_norm + width/2)
-        
-        # Ensure valid filter bounds
-        if low_bound >= high_bound or (high_bound - low_bound) < 0.01:
-            continue
-        
+        # Use adaptive filter design for better performance
         try:
-            # Create a bandstop filter with configurable order
-            b, a = signal.butter(config.filter_order, [low_bound, high_bound], btype='bandstop')
+            b, a = processor.adaptive_filter_design(result, sr, freq_range)
             
             # Apply the filter with error checking
             filtered = signal.filtfilt(b, a, result)
             
             # Check for numerical issues
             if np.any(np.isnan(filtered)) or np.any(np.isinf(filtered)):
-                # Skip this filter if it produces invalid values
+                logger.warning(f"Filter for range {freq_range} produced invalid values, skipping")
                 continue
             
             result = filtered
+            logger.debug(f"Applied filter for frequency range {freq_range}")
             
-        except Exception:
-            # Skip this filter if it fails
+        except Exception as e:
+            logger.warning(f"Failed to apply filter for range {freq_range}: {e}")
             continue
     
     # If we're removing high-frequency watermarks, add a small amount of noise
@@ -1277,6 +1482,13 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
     logger.info(f"Starting processing with {level} level for file: {os.path.basename(input_path)}")
     start_time = time.time()
     
+    # Memory monitoring
+    if psutil:
+        process = psutil.Process()
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+    else:
+        initial_memory = 0.0
+    
     # Create temporary processing directory
     temp_dir = tempfile.mkdtemp()
     
@@ -1295,62 +1507,102 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
             
         # Stage 1: Clean metadata
         logger.info("Stage 1: Cleaning metadata...")
+        stage_start = time.time()
         temp_metadata = os.path.join(temp_dir, f"stage1_metadata{file_ext}")
         result_path, removed_metadata = clean_metadata_comprehensive(
             input_path, temp_metadata, aggressive
         )
         stats.metadata_removed = removed_metadata
+        stats.add_timing("metadata_cleaning", time.time() - stage_start)
         
         # Stage 2: Remove spectral watermarks
         logger.info("Stage 2: Detecting and removing spectral watermarks...")
+        stage_start = time.time()
         temp_watermark = os.path.join(temp_dir, f"stage2_watermark{file_ext}")
         result_path, watermarks = remove_spectral_watermarks(
             result_path, temp_watermark, detector
         )
         stats.watermarks_detected = len(watermarks)
+        stats.add_timing("watermark_removal", time.time() - stage_start)
         
         # Stage 3: Normalize statistical patterns
         logger.info("Stage 3: Normalizing statistical patterns...")
+        stage_start = time.time()
         temp_patterns = os.path.join(temp_dir, f"stage3_patterns{file_ext}")
         result_path, patterns = normalize_ai_patterns(
             result_path, temp_patterns, detector
         )
         stats.patterns_normalized = len(patterns)
+        stats.add_timing("pattern_normalization", time.time() - stage_start)
         
         # Stage 4: Add human-like timing variations (final stage)
         logger.info("Stage 4: Adding timing variations...")
+        stage_start = time.time()
         # This step applies additional subtle timing variations to audio content
         # to further mask AI generation patterns
         try:
             y, sr = librosa.load(result_path, sr=None, mono=False)
             
-            # Memory optimization for large files
-            if len(y.shape) > 1 and y.shape[1] > sr * 300:  # >5 minutes
-                logger.info("Large file detected - processing in chunks")
+            # Create processor for chunked processing
+            processor = AudioProcessor(config)
             
             is_stereo = len(y.shape) > 1
+            audio_length = y.shape[1] if is_stereo else len(y)
             
-            if is_stereo:
-                processed = np.zeros_like(y)
-                for i in range(y.shape[0]):
-                    processed[i] = add_timing_variations(y[i], sr, config)
+            # Memory optimization and chunked processing for large files
+            if audio_length > sr * 60:  # >1 minute
+                logger.info(f"Large file detected ({audio_length/sr:.1f}s) - using chunked processing")
+                
+                if is_stereo:
+                    processed = np.zeros_like(y)
+                    for i in range(y.shape[0]):
+                        processed[i] = processor.process_large_audio_chunked(
+                            y[i], sr, add_timing_variations, config
+                        )
+                else:
+                    processed = processor.process_large_audio_chunked(
+                        y, sr, add_timing_variations, config
+                    )
             else:
-                processed = add_timing_variations(y, sr, config)
+                # Standard processing for smaller files
+                if is_stereo:
+                    processed = np.zeros_like(y)
+                    for i in range(y.shape[0]):
+                        processed[i] = add_timing_variations(y[i], sr, config)
+                else:
+                    processed = add_timing_variations(y, sr, config)
                 
             # Save to final output location
             sf.write(output_path, processed.T if is_stereo else processed, sr)
             stats.timing_adjustments = 1
+            stats.add_timing("timing_variations", time.time() - stage_start)
             
         except Exception as e:
             logger.error(f"Error in final timing adjustments: {e}")
             # If final processing fails, use previous stage result
             shutil.copy2(result_path, output_path)
+            stats.add_timing("timing_variations", time.time() - stage_start)
         
         # Increment files processed count
         stats.files_processed = 1
         
+        # Final performance metrics
         processing_time = time.time() - start_time
+        stats.processing_time = processing_time
+        if psutil:
+            current_memory = process.memory_info().rss / 1024 / 1024  # MB
+            stats.memory_peak_mb = max(initial_memory, current_memory)
+        else:
+            current_memory = 0.0
+            stats.memory_peak_mb = 0.0
+        stats.cache_hits = len([k for k in detector._cache.keys() if k.startswith('watermarks_')])
+        
         logger.info(f"Processing completed in {processing_time:.2f} seconds")
+        if psutil:
+            logger.info(f"Memory usage: {current_memory:.1f}MB (peak: {stats.memory_peak_mb:.1f}MB)")
+        if hasattr(stats, 'operation_timings'):
+            for operation, duration in stats.operation_timings.items():
+                logger.debug(f"  {operation}: {duration:.2f}s")
         
         return output_path, stats
         
@@ -1381,40 +1633,93 @@ def add_timing_variations(audio: np.ndarray, sr: int, config: ProcessingConfig) 
     if len(audio) < sr:  # Less than 1 second
         return audio
         
-    # Parameters for variation
-    segment_size = sr // 4  # ~250ms segments
-    overlap = int(segment_size * config.segment_overlap_ratio)
+    # Adaptive segment sizing based on audio characteristics
+    # Shorter segments for more complex audio, longer for simpler
+    base_segment_size = sr // 4  # ~250ms base
+    
+    # Analyze audio complexity to determine optimal segment size
+    try:
+        # Simple complexity measure: standard deviation of differences
+        complexity = np.std(np.diff(audio[:min(sr*10, len(audio))]))  # Sample first 10 seconds
+        if complexity > 0.01:  # High complexity audio
+            segment_size = max(sr // 8, base_segment_size // 2)  # Smaller segments
+        else:  # Lower complexity audio
+            segment_size = min(sr // 2, base_segment_size * 2)  # Larger segments
+    except:
+        segment_size = base_segment_size
+    
+    hop_size = int(segment_size * (1 - config.segment_overlap_ratio))
     
     # Calculate number of segments
-    num_segments = (len(audio) - segment_size) // overlap + 1
+    num_segments = (len(audio) - segment_size) // hop_size + 1
     
     # If too few segments, just return original
     if num_segments < 3:
         return audio
     
-    # Initialize output array
+    # Initialize output array with proper overlap handling
     result = np.zeros(len(audio))
-    window = get_hann_window(segment_size)  # Hann window for smooth transitions
+    normalization_weights = np.zeros(len(audio))
+    
+    # Use a better window function for smoother transitions
+    window = get_hann_window(segment_size)
+    
+    logger.debug(f"Processing {num_segments} segments of {segment_size/sr:.3f}s each")
     
     # Process each segment with slight random variations
     for i in range(num_segments):
-        start = i * overlap
-        segment = audio[start:start+segment_size].copy()
+        start = i * hop_size
+        end = min(start + segment_size, len(audio))
+        actual_segment_size = end - start
+        
+        if actual_segment_size < sr // 20:  # Skip very small segments (<50ms)
+            continue
+            
+        segment = audio[start:end].copy()
         
         # Random micro-timing adjustment based on config
         variation_range = config.timing_variation_range
-        random_var = (1.0 - variation_range) + (2 * variation_range * random.random())
+        random_var = 1.0 + (2 * variation_range * (random.random() - 0.5))
         
-        # Apply subtle pitch shift (which affects timing)
-        # Using a simple resampling approach for speed
-        indices = np.arange(0, len(segment), random_var)
-        indices = indices[indices < len(segment)]
-        adjusted = np.interp(np.arange(len(segment)), indices, segment[np.floor(indices).astype(int)])
+        # Apply subtle time stretching using librosa for better quality
+        try:
+            # Only apply if variation is significant enough
+            if abs(random_var - 1.0) > 0.001:
+                adjusted = librosa.effects.time_stretch(segment, rate=1.0/random_var)
+            else:
+                adjusted = segment
+        except:
+            # Fallback to simple interpolation if librosa fails
+            indices = np.arange(0, len(segment), random_var)
+            indices = indices[indices < len(segment)]
+            if len(indices) > 1:
+                adjusted = np.interp(np.arange(len(segment)), indices, segment[np.floor(indices).astype(int)])
+            else:
+                adjusted = segment
         
-        # Apply window and add to result
-        result[start:start+segment_size] += adjusted * window
+        # Ensure the adjusted segment fits
+        if len(adjusted) > actual_segment_size:
+            adjusted = adjusted[:actual_segment_size]
+        elif len(adjusted) < actual_segment_size:
+            adjusted = np.pad(adjusted, (0, actual_segment_size - len(adjusted)))
+        
+        # Apply appropriate window
+        if len(adjusted) == segment_size:
+            windowed = adjusted * window
+        else:
+            # Create appropriate window for actual size
+            actual_window = get_hann_window(len(adjusted))
+            windowed = adjusted * actual_window
+        
+        # Add to result with overlap handling
+        result[start:start+len(windowed)] += windowed
+        normalization_weights[start:start+len(windowed)] += actual_window if len(adjusted) != segment_size else window
     
-    # Normalize output level to match input
+    # Normalize by window overlap
+    mask = normalization_weights > 0.001
+    result[mask] = result[mask] / normalization_weights[mask]
+    
+    # Final RMS normalization to preserve energy
     input_rms = np.sqrt(np.mean(audio**2))
     output_rms = np.sqrt(np.mean(result**2))
     if output_rms > 0:
