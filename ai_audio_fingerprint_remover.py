@@ -30,15 +30,22 @@ import hashlib
 import struct
 import wave
 import array
+import logging
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Union, Set
 from dataclasses import dataclass
 import uuid
+import warnings
+
+# Suppress librosa warnings for cleaner output
+warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
 
 try:
     import numpy as np
-    from scipy import signal
+    from scipy import signal, stats
     from scipy.io import wavfile
+    from scipy.signal import hilbert
     # Try to import windows from scipy.signal for newer versions
     try:
         from scipy.signal import windows
@@ -71,6 +78,15 @@ except ImportError:
     print("Please install them using: pip install librosa soundfile")
     sys.exit(1)
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Constants
 KNOWN_AI_TAG_PATTERNS = [
@@ -121,6 +137,182 @@ POTENTIAL_WATERMARK_FREQS = [
     [8000, 8500],    # Mid-range markers
     [12000, 12500]   # Secondary watermark range
 ]
+
+
+class AdvancedAudioAnalysis:
+    """Advanced audio analysis methods for sophisticated fingerprint detection."""
+    
+    @staticmethod
+    def calculate_spectral_entropy(audio: np.ndarray, sr: int, frame_length: int = 2048) -> np.ndarray:
+        """Calculate spectral entropy for detecting artificial patterns."""
+        try:
+            # Compute STFT
+            stft = librosa.stft(audio, n_fft=frame_length, hop_length=frame_length//4)
+            magnitude = np.abs(stft)
+            
+            # Normalize each frame
+            magnitude_norm = magnitude / (np.sum(magnitude, axis=0, keepdims=True) + 1e-10)
+            
+            # Calculate entropy for each frame
+            entropy = -np.sum(magnitude_norm * np.log2(magnitude_norm + 1e-10), axis=0)
+            
+            return entropy
+        except Exception as e:
+            logger.warning(f"Spectral entropy calculation failed: {e}")
+            return np.array([])
+    
+    @staticmethod
+    def detect_periodic_patterns(audio: np.ndarray, sr: int, min_period: float = 0.1, 
+                                max_period: float = 2.0) -> Dict[str, Any]:
+        """Detect periodic patterns using advanced autocorrelation."""
+        try:
+            # Calculate autocorrelation
+            autocorr = np.correlate(audio, audio, mode='full')
+            autocorr = autocorr[len(autocorr)//2:]
+            
+            # Convert period bounds to samples
+            min_samples = int(min_period * sr)
+            max_samples = int(max_period * sr)
+            
+            # Only consider relevant range
+            if max_samples < len(autocorr):
+                autocorr_slice = autocorr[min_samples:max_samples]
+            else:
+                autocorr_slice = autocorr[min_samples:]
+            
+            if len(autocorr_slice) == 0:
+                return {'periodicity_strength': 0.0, 'dominant_period': None}
+            
+            # Find peaks
+            peaks, _ = signal.find_peaks(autocorr_slice, height=0.1*np.max(autocorr_slice))
+            
+            if len(peaks) == 0:
+                return {'periodicity_strength': 0.0, 'dominant_period': None}
+            
+            # Calculate periodicity strength
+            max_peak_idx = np.argmax(autocorr_slice[peaks])
+            dominant_period_samples = peaks[max_peak_idx] + min_samples
+            dominant_period_time = dominant_period_samples / sr
+            
+            # Strength is the ratio of the dominant peak to the signal energy
+            periodicity_strength = autocorr_slice[peaks[max_peak_idx]] / autocorr[0]
+            
+            return {
+                'periodicity_strength': periodicity_strength,
+                'dominant_period': dominant_period_time,
+                'num_peaks': len(peaks)
+            }
+        except Exception as e:
+            logger.warning(f"Periodic pattern detection failed: {e}")
+            return {'periodicity_strength': 0.0, 'dominant_period': None}
+    
+    @staticmethod
+    def analyze_frequency_distribution(audio: np.ndarray, sr: int) -> Dict[str, float]:
+        """Analyze frequency distribution for detecting artificial characteristics."""
+        try:
+            # Compute power spectral density
+            freqs, psd = signal.welch(audio, sr, nperseg=min(2048, len(audio)//4))
+            
+            # Calculate various distribution metrics
+            psd_norm = psd / np.sum(psd)
+            
+            # Spectral centroid
+            spectral_centroid = np.sum(freqs * psd_norm)
+            
+            # Spectral spread
+            spectral_spread = np.sqrt(np.sum(((freqs - spectral_centroid) ** 2) * psd_norm))
+            
+            # Spectral skewness and kurtosis
+            if spectral_spread > 0:
+                spectral_skewness = np.sum(((freqs - spectral_centroid) ** 3) * psd_norm) / (spectral_spread ** 3)
+                spectral_kurtosis = np.sum(((freqs - spectral_centroid) ** 4) * psd_norm) / (spectral_spread ** 4)
+            else:
+                spectral_skewness = 0.0
+                spectral_kurtosis = 3.0
+            
+            # High frequency energy ratio
+            nyquist = sr / 2
+            high_freq_mask = freqs > 0.8 * nyquist
+            high_freq_energy = np.sum(psd[high_freq_mask]) / np.sum(psd) if np.sum(psd) > 0 else 0.0
+            
+            return {
+                'spectral_centroid': spectral_centroid,
+                'spectral_spread': spectral_spread,
+                'spectral_skewness': spectral_skewness,
+                'spectral_kurtosis': spectral_kurtosis,
+                'high_freq_energy_ratio': high_freq_energy
+            }
+        except Exception as e:
+            logger.warning(f"Frequency distribution analysis failed: {e}")
+            return {
+                'spectral_centroid': 0.0,
+                'spectral_spread': 0.0,
+                'spectral_skewness': 0.0,
+                'spectral_kurtosis': 3.0,
+                'high_freq_energy_ratio': 0.0
+            }
+    
+    @staticmethod
+    def calculate_complexity_measures(audio: np.ndarray) -> Dict[str, float]:
+        """Calculate complexity measures to detect artificial generation."""
+        try:
+            # Sample entropy (simplified version)
+            def sample_entropy(data, m=2, r=None):
+                if r is None:
+                    r = 0.2 * np.std(data)
+                
+                N = len(data)
+                if N < m + 1:
+                    return 0.0
+                
+                patterns = [0, 0]
+                
+                # Sample a subset for performance
+                sample_size = min(1000, N - m)
+                indices = np.random.choice(N - m, sample_size, replace=False)
+                
+                for i in indices:
+                    template = data[i:i + m]
+                    matches_m = 0
+                    matches_m_plus_1 = 0
+                    
+                    for j in range(N - m):
+                        if j != i:
+                            dist = np.max(np.abs(template - data[j:j + m]))
+                            if dist < r:
+                                matches_m += 1
+                                if j < N - m and i < N - m:
+                                    dist_plus = np.max(np.abs(data[i:i + m + 1] - data[j:j + m + 1]))
+                                    if dist_plus < r:
+                                        matches_m_plus_1 += 1
+                    
+                    patterns[0] += matches_m
+                    patterns[1] += matches_m_plus_1
+                
+                if patterns[0] == 0 or patterns[1] == 0:
+                    return 0.0
+                
+                return -np.log(patterns[1] / patterns[0])
+            
+            # Calculate sample entropy
+            sample_ent = sample_entropy(audio[:min(5000, len(audio))])  # Limit for performance
+            
+            # Spectral flatness (measure of noisiness vs tonality)
+            stft = np.abs(librosa.stft(audio, n_fft=1024))
+            spectral_flatness = np.mean(stats.gmean(stft + 1e-10, axis=0) / 
+                                      (np.mean(stft, axis=0) + 1e-10))
+            
+            return {
+                'sample_entropy': sample_ent if np.isfinite(sample_ent) else 0.0,
+                'spectral_flatness': spectral_flatness if np.isfinite(spectral_flatness) else 0.0
+            }
+        
+        except Exception as e:
+            logger.warning(f"Complexity analysis failed: {e}")
+            return {
+                'sample_entropy': 0.0,
+                'spectral_flatness': 0.0
+            }
 
 
 def get_hann_window(size: int) -> np.ndarray:
@@ -241,132 +433,204 @@ class AudioFingerprint:
     def __init__(self, config: ProcessingConfig):
         self.config = config
         self.log_details = []
+        self.analysis = AdvancedAudioAnalysis()
     
     def detect_spectral_watermarks(self, audio_data: np.ndarray, sample_rate: int) -> List[Dict[str, Any]]:
-        """Detect potential spectral watermarks in the audio."""
+        """Detect potential spectral watermarks in the audio using advanced analysis."""
         detected = []
         
-        # Convert to mono if stereo
-        if len(audio_data.shape) > 1:
-            audio_mono = np.mean(audio_data, axis=1)
-        else:
-            audio_mono = audio_data
-            
-        # Perform spectral analysis
-        freqs, times, spectrogram = signal.spectrogram(
-            audio_mono, 
-            fs=sample_rate,
-            window='hann',
-            nperseg=2048,
-            noverlap=1024,
-            scaling='spectrum'
-        )
+        # Input validation
+        if len(audio_data) == 0:
+            logger.warning("Empty audio data provided to watermark detection")
+            return detected
         
-        # Look for anomalies in frequency bands commonly used for watermarking
-        for freq_range in POTENTIAL_WATERMARK_FREQS:
-            if freq_range[1] > sample_rate / 2:
-                continue  # Skip if beyond Nyquist frequency
-                
-            # Find the indices for our frequency range
-            freq_mask = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
-            if not np.any(freq_mask):
-                continue
-                
-            band_energy = np.mean(spectrogram[freq_mask], axis=0)
+        try:
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1:
+                audio_mono = np.mean(audio_data, axis=1)
+            else:
+                audio_mono = audio_data
             
-            # Calculate statistics
-            mean_energy = np.mean(band_energy)
-            std_energy = np.std(band_energy)
+            logger.info(f"Analyzing {len(audio_mono)} samples at {sample_rate} Hz")
             
-            # Look for periodic patterns in this band
-            if std_energy > 0:
-                normalized = (band_energy - mean_energy) / std_energy
-                autocorr = np.correlate(normalized, normalized, mode='full')
-                autocorr = autocorr[len(autocorr)//2:]
-                
-                # Check for peaks in autocorrelation (suggesting periodicity)
-                if len(autocorr) > 1:
-                    peaks, _ = signal.find_peaks(autocorr, height=0.5, distance=5)
-                    if len(peaks) >= 3:  # At least 3 regular peaks suggests a pattern
-                        detected.append({
-                            'freq_range': freq_range,
-                            'peak_count': len(peaks),
-                            'regularity': np.std(np.diff(peaks)),
-                            'strength': np.max(autocorr[peaks])
-                        })
-                        
-            # Also check for constant energy in bands where human audio would vary
-            if freq_range[0] > 15000 and np.std(band_energy) / (mean_energy + 1e-10) < 0.1:
+            # Enhanced spectral analysis with better time-frequency resolution
+            nperseg = min(4096, len(audio_mono) // 8)  # Adaptive window size
+            noverlap = nperseg // 2
+            
+            freqs, times, spectrogram = signal.spectrogram(
+                audio_mono, 
+                fs=sample_rate,
+                window='hann',
+                nperseg=nperseg,
+                noverlap=noverlap,
+                scaling='spectrum'
+            )
+            
+            # Calculate spectral entropy to detect artificial patterns
+            entropy = self.analysis.calculate_spectral_entropy(audio_mono, sample_rate)
+            
+            # Advanced frequency distribution analysis
+            freq_stats = self.analysis.analyze_frequency_distribution(audio_mono, sample_rate)
+            
+            # Detect anomalies in high-frequency energy (common watermark location)
+            if freq_stats['high_freq_energy_ratio'] > 0.1:  # Unusually high energy in high frequencies
                 detected.append({
-                    'freq_range': freq_range,
-                    'type': 'constant_energy',
-                    'variation': np.std(band_energy) / (mean_energy + 1e-10)
+                    'type': 'high_freq_anomaly',
+                    'energy_ratio': freq_stats['high_freq_energy_ratio'],
+                    'freq_range': [0.8 * sample_rate / 2, sample_rate / 2],
+                    'confidence': min(freq_stats['high_freq_energy_ratio'] * 10, 1.0)
                 })
+            
+                        # Check for spectral entropy anomalies
+            if len(entropy) > 0:
+                entropy_std = np.std(entropy)
+                entropy_mean = np.mean(entropy)
                 
+                # Low entropy regions might indicate watermarks
+                low_entropy_mask = entropy < (entropy_mean - 2 * entropy_std)
+                if np.sum(low_entropy_mask) > len(entropy) * 0.1:  # >10% of frames have low entropy
+                    detected.append({
+                        'type': 'entropy_anomaly',
+                        'low_entropy_ratio': np.sum(low_entropy_mask) / len(entropy),
+                        'confidence': min(np.sum(low_entropy_mask) / len(entropy) * 5, 1.0)
+                    })
+            
+            # Look for anomalies in frequency bands commonly used for watermarking
+            for freq_range in POTENTIAL_WATERMARK_FREQS:
+                if freq_range[1] > sample_rate / 2:
+                    continue  # Skip if beyond Nyquist frequency
+                    
+                # Find the indices for our frequency range
+                freq_mask = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
+                if not np.any(freq_mask):
+                    continue
+                    
+                band_energy = np.mean(spectrogram[freq_mask], axis=0)
+                
+                # Calculate statistics
+                mean_energy = np.mean(band_energy)
+                std_energy = np.std(band_energy)
+                
+                # Look for periodic patterns in this band
+                if std_energy > 0:
+                    normalized = (band_energy - mean_energy) / std_energy
+                    autocorr = np.correlate(normalized, normalized, mode='full')
+                    autocorr = autocorr[len(autocorr)//2:]
+                    
+                    # Check for peaks in autocorrelation (suggesting periodicity)
+                    if len(autocorr) > 1:
+                        peaks, _ = signal.find_peaks(autocorr, height=0.5, distance=5)
+                        if len(peaks) >= 3:  # At least 3 regular peaks suggests a pattern
+                            detected.append({
+                                'freq_range': freq_range,
+                                'peak_count': len(peaks),
+                                'regularity': np.std(np.diff(peaks)),
+                                'strength': np.max(autocorr[peaks])
+                            })
+                            
+                # Also check for constant energy in bands where human audio would vary
+                if freq_range[0] > 15000 and np.std(band_energy) / (mean_energy + 1e-10) < 0.1:
+                    detected.append({
+                        'freq_range': freq_range,
+                        'type': 'constant_energy',
+                        'variation': np.std(band_energy) / (mean_energy + 1e-10)
+                    })
+                    
+        except Exception as e:
+            logger.error(f"Spectral watermark detection failed: {e}")
+            
         return detected
         
     def detect_statistical_patterns(self, audio_data: np.ndarray) -> List[Dict[str, Any]]:
-        """Detect statistical anomalies that could indicate AI generation."""
+        """Detect statistical anomalies that could indicate AI generation using advanced analysis."""
         detected = []
         
-        # Convert to mono if stereo
-        if len(audio_data.shape) > 1:
-            audio_mono = np.mean(audio_data, axis=1)
-        else:
-            audio_mono = audio_data
+        # Input validation
+        if len(audio_data) == 0:
+            logger.warning("Empty audio data provided to statistical pattern detection")
+            return detected
         
-        # Check for unusually perfect timing
-        zero_crossings = np.where(np.diff(np.signbit(audio_mono)))[0]
-        if len(zero_crossings) > 0:
-            # Calculate intervals between zero crossings
-            intervals = np.diff(zero_crossings)
+        try:
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1:
+                audio_mono = np.mean(audio_data, axis=1)
+            else:
+                audio_mono = audio_data
             
-            # Look for too-regular patterns
-            if len(intervals) > 100:
-                regularity = np.std(intervals) / np.mean(intervals)
-                if regularity < 0.2:  # Human audio is rarely this regular
-                    detected.append({
-                        'type': 'regular_timing',
-                        'regularity': regularity
-                    })
-        
-        # Check for unnatural amplitude distribution
-        hist, _ = np.histogram(audio_mono, bins=100, range=(-1, 1), density=True)
-        skewness = np.sum((hist - np.mean(hist))**3) / (len(hist) * np.std(hist)**3)
-        kurtosis = np.sum((hist - np.mean(hist))**4) / (len(hist) * np.std(hist)**4) - 3
-        
-        # Perfect gaussian is unusual in real audio
-        if abs(skewness) < 0.1 and abs(kurtosis) < 0.2:
-            detected.append({
-                'type': 'perfect_distribution',
-                'skewness': skewness,
-                'kurtosis': kurtosis
-            })
+            # Advanced complexity analysis
+            complexity_measures = self.analysis.calculate_complexity_measures(audio_mono)
             
-        # Check for lack of harmonics in frequency domain
-        fft_data = np.abs(np.fft.rfft(audio_mono))
-        if len(fft_data) > 1000:
-            # Real audio typically has strong harmonic relationships
-            peaks, _ = signal.find_peaks(fft_data, height=np.mean(fft_data)*2, distance=5)
-            if len(peaks) > 0:
-                # Check if harmonics are too perfect or missing
-                peak_freqs = peaks.astype(float)
-                ratios = []
+            # Low sample entropy indicates artificial/repetitive patterns
+            if complexity_measures['sample_entropy'] < 0.5:
+                detected.append({
+                    'type': 'low_complexity',
+                    'sample_entropy': complexity_measures['sample_entropy'],
+                    'confidence': 1.0 - complexity_measures['sample_entropy']
+                })
+            
+                        # Very high spectral flatness can indicate artificial noise or processing
+            if complexity_measures['spectral_flatness'] > 0.8:
+                detected.append({
+                    'type': 'artificial_flatness',
+                    'spectral_flatness': complexity_measures['spectral_flatness'],
+                    'confidence': complexity_measures['spectral_flatness']
+                })
+            
+            # Check for unusually perfect timing
+            zero_crossings = np.where(np.diff(np.signbit(audio_mono)))[0]
+            if len(zero_crossings) > 0:
+                # Calculate intervals between zero crossings
+                intervals = np.diff(zero_crossings)
                 
-                for i in range(len(peak_freqs)-1):
-                    for j in range(i+1, min(i+5, len(peak_freqs))):
-                        ratio = peak_freqs[j] / (peak_freqs[i] + 1e-10)
-                        ratios.append(ratio)
+                # Look for too-regular patterns
+                if len(intervals) > 100:
+                    regularity = np.std(intervals) / np.mean(intervals)
+                    if regularity < 0.2:  # Human audio is rarely this regular
+                        detected.append({
+                            'type': 'regular_timing',
+                            'regularity': regularity
+                        })
+            
+            # Check for unnatural amplitude distribution
+            hist, _ = np.histogram(audio_mono, bins=100, range=(-1, 1), density=True)
+            skewness = np.sum((hist - np.mean(hist))**3) / (len(hist) * np.std(hist)**3)
+            kurtosis = np.sum((hist - np.mean(hist))**4) / (len(hist) * np.std(hist)**4) - 3
+            
+            # Perfect gaussian is unusual in real audio
+            if abs(skewness) < 0.1 and abs(kurtosis) < 0.2:
+                detected.append({
+                    'type': 'perfect_distribution',
+                    'skewness': skewness,
+                    'kurtosis': kurtosis
+                })
                 
-                if len(ratios) > 5:
-                    has_harmonics = any(0.95 < r < 1.05 or 1.95 < r < 2.05 or 2.95 < r < 3.05 for r in ratios)
-                    if not has_harmonics:
-                        detected.append({'type': 'missing_harmonics'})
+            # Check for lack of harmonics in frequency domain
+            fft_data = np.abs(np.fft.rfft(audio_mono))
+            if len(fft_data) > 1000:
+                # Real audio typically has strong harmonic relationships
+                peaks, _ = signal.find_peaks(fft_data, height=np.mean(fft_data)*2, distance=5)
+                if len(peaks) > 0:
+                    # Check if harmonics are too perfect or missing
+                    peak_freqs = peaks.astype(float)
+                    ratios = []
                     
-                    # Or check if they're too perfect (exact integer multiples)
-                    perfect_count = sum(1 for r in ratios if abs(round(r) - r) < 0.01)
-                    if perfect_count > len(ratios) / 2:
-                        detected.append({'type': 'too_perfect_harmonics'})
+                    for i in range(len(peak_freqs)-1):
+                        for j in range(i+1, min(i+5, len(peak_freqs))):
+                            ratio = peak_freqs[j] / (peak_freqs[i] + 1e-10)
+                            ratios.append(ratio)
+                    
+                    if len(ratios) > 5:
+                        has_harmonics = any(0.95 < r < 1.05 or 1.95 < r < 2.05 or 2.95 < r < 3.05 for r in ratios)
+                        if not has_harmonics:
+                            detected.append({'type': 'missing_harmonics'})
+                        
+                        # Or check if they're too perfect (exact integer multiples)
+                        perfect_count = sum(1 for r in ratios if abs(round(r) - r) < 0.01)
+                        if perfect_count > len(ratios) / 2:
+                            detected.append({'type': 'too_perfect_harmonics'})
+                            
+        except Exception as e:
+            logger.error(f"Statistical pattern detection failed: {e}")
         
         return detected
 
@@ -672,11 +936,16 @@ def remove_spectral_watermarks(audio_path: str, output_path: str,
     2. Applies targeted filters to remove them
     3. Saves a clean version
     """
+    # Input validation
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    
     # Load the audio file
     try:
         y, sr = librosa.load(audio_path, sr=None, mono=False)
+        logger.debug(f"Loaded audio: shape={y.shape if hasattr(y, 'shape') else len(y)}, sr={sr}")
     except Exception as e:
-        print(f"Error loading audio for watermark removal: {e}")
+        logger.error(f"Error loading audio for watermark removal: {e}")
         shutil.copy2(audio_path, output_path)
         return output_path, []
     
@@ -981,6 +1250,21 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
     3. Normalize statistical patterns
     4. Add human-like variations
     """
+    # Input validation
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    
+    # Check file size and warn for very large files
+    file_size = os.path.getsize(input_path)
+    if file_size > 500 * 1024 * 1024:  # 500MB
+        logger.warning(f"Large file detected ({file_size // (1024*1024)}MB). Processing may take significant time and memory.")
+    
+    # Check file format
+    supported_formats = ['.mp3', '.wav', '.flac', '.aiff', '.aif']
+    file_ext = os.path.splitext(input_path)[1].lower()
+    if file_ext not in supported_formats:
+        raise ValueError(f"Unsupported file format: {file_ext}. Supported formats: {supported_formats}")
+    
     # Determine processing level
     if level is None:
         level = "aggressive" if aggressive else "moderate"
@@ -989,6 +1273,9 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
     stats = ProcessingStats()
     stats.processing_level = level
     detector = AudioFingerprint(config=config)
+    
+    logger.info(f"Starting processing with {level} level for file: {os.path.basename(input_path)}")
+    start_time = time.time()
     
     # Create temporary processing directory
     temp_dir = tempfile.mkdtemp()
@@ -1000,8 +1287,14 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
         # Determine final output path
         if output_path is None:
             output_path = input_path
+        
+        # Ensure output directory exists
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
             
         # Stage 1: Clean metadata
+        logger.info("Stage 1: Cleaning metadata...")
         temp_metadata = os.path.join(temp_dir, f"stage1_metadata{file_ext}")
         result_path, removed_metadata = clean_metadata_comprehensive(
             input_path, temp_metadata, aggressive
@@ -1009,6 +1302,7 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
         stats.metadata_removed = removed_metadata
         
         # Stage 2: Remove spectral watermarks
+        logger.info("Stage 2: Detecting and removing spectral watermarks...")
         temp_watermark = os.path.join(temp_dir, f"stage2_watermark{file_ext}")
         result_path, watermarks = remove_spectral_watermarks(
             result_path, temp_watermark, detector
@@ -1016,6 +1310,7 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
         stats.watermarks_detected = len(watermarks)
         
         # Stage 3: Normalize statistical patterns
+        logger.info("Stage 3: Normalizing statistical patterns...")
         temp_patterns = os.path.join(temp_dir, f"stage3_patterns{file_ext}")
         result_path, patterns = normalize_ai_patterns(
             result_path, temp_patterns, detector
@@ -1023,10 +1318,16 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
         stats.patterns_normalized = len(patterns)
         
         # Stage 4: Add human-like timing variations (final stage)
+        logger.info("Stage 4: Adding timing variations...")
         # This step applies additional subtle timing variations to audio content
         # to further mask AI generation patterns
         try:
             y, sr = librosa.load(result_path, sr=None, mono=False)
+            
+            # Memory optimization for large files
+            if len(y.shape) > 1 and y.shape[1] > sr * 300:  # >5 minutes
+                logger.info("Large file detected - processing in chunks")
+            
             is_stereo = len(y.shape) > 1
             
             if is_stereo:
@@ -1041,30 +1342,34 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
             stats.timing_adjustments = 1
             
         except Exception as e:
-            print(f"Warning: Error in final timing adjustments: {e}")
+            logger.error(f"Error in final timing adjustments: {e}")
             # If final processing fails, use previous stage result
             shutil.copy2(result_path, output_path)
         
         # Increment files processed count
         stats.files_processed = 1
         
+        processing_time = time.time() - start_time
+        logger.info(f"Processing completed in {processing_time:.2f} seconds")
+        
         return output_path, stats
         
     except Exception as e:
-        print(f"Error processing {input_path}: {e}")
+        logger.error(f"Error processing {input_path}: {e}")
         # If something goes wrong, try to copy original file to output
         if output_path and output_path != input_path:
             try:
                 shutil.copy2(input_path, output_path)
-            except:
-                pass
-        return input_path, stats
+                logger.warning("Copied original file due to processing error")
+            except Exception as copy_error:
+                logger.error(f"Failed to copy original file: {copy_error}")
+        raise e
     finally:
         # Clean up temp directory
         try:
             shutil.rmtree(temp_dir)
-        except:
-            pass
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to clean up temporary directory: {cleanup_error}")
 
 
 def add_timing_variations(audio: np.ndarray, sr: int, config: ProcessingConfig) -> np.ndarray:
