@@ -1,0 +1,59 @@
+Advanced Watermark Analysis Report
+==================================================
+File: Like a Glitch in the Stack-190190-190190-2025-06-04.mp3
+Sample Rate: 48000 Hz
+Duration: 224.84 seconds
+
+Frequency Band Analysis:
+-------------------------
+50-200Hz: Low frequency steganography - Normal
+  Anomaly Score: 0.40
+  Mean Energy: -46.8 dB
+
+8000-8500Hz: Mid-range markers - Normal
+  Anomaly Score: 0.40
+  Mean Energy: -75.4 dB
+
+12000-12500Hz: Secondary watermark range - Normal
+  Anomaly Score: 0.40
+  Mean Energy: -83.4 dB
+
+15000-17000Hz: ElevenLabs/similar range - Normal
+  Anomaly Score: 0.40
+  Mean Energy: -91.4 dB
+
+17000-19000Hz: Extended high-freq range - Normal
+  Anomaly Score: 0.40
+  Mean Energy: -97.3 dB
+
+19000-20000Hz: Ultrasonic range - Normal
+  Anomaly Score: 0.30
+  Mean Energy: -100.0 dB
+
+20000-22000Hz: Extended ultrasonic - Normal
+  Anomaly Score: 0.30
+  Mean Energy: -100.0 dB
+
+22000-24000Hz: Maximum frequency range - Normal
+  Anomaly Score: 0.30
+  Mean Energy: -100.0 dB
+
+Temporal Pattern Analysis:
+--------------------------
+Periodic Energy Patterns: Normal
+  Number of peaks: 289
+  Period regularity: 0.837
+
+High Frequency Carrier Analysis:
+--------------------------------
+No high frequency carriers detected
+
+Phase Coherence Analysis:
+-------------------------
+High Frequency Phase Coherence: Normal
+  Max Coherence: 0.568
+
+Overall Assessment:
+------------------
+MINIMAL PROBABILITY of watermarking
+Suspicious indicators: 0/11

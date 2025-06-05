@@ -173,6 +173,29 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Test files
+# Audio files and artifacts
 *.wav
 *.mp3
+*.flac
+*.aac
+*.ogg
+*.m4a
+*.wma
+*.aiff
+*.au
+*.raw
+
+# Processing artifacts
+*_output.*
+*_test.*
+*_processed.*
+*_cleaned.*
+*_watermark_removed.*
+*_sota_*
+*_aggressive_*
+*_enhanced_*
+
+# Temporary files
+temp_*
+tmp_*
+.DS_Store

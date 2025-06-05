@@ -48,6 +48,9 @@ except ImportError:
 
 try:
     import numpy as np
+    from enhanced_suno_detector import SunoWatermarkDetector
+    from aggressive_watermark_remover import AggressiveWatermarkRemover
+    from sota_watermark_remover import StateOfTheArtWatermarkRemover
     from scipy import signal, stats
     from scipy.io import wavfile
     from scipy.signal import hilbert
@@ -506,6 +509,9 @@ def get_hann_window(size: int) -> np.ndarray:
 @dataclass
 class ProcessingConfig:
     """Configuration parameters for different processing intensity levels."""
+    # Processing level
+    processing_level: str = "moderate"  # gentle, moderate, aggressive, extreme
+    
     # Watermark removal parameters
     filter_order: int = 4  # Order of bandstop filters
     filter_width_multiplier: float = 1.5  # How wide to make the filter bands
@@ -534,6 +540,7 @@ class ProcessingConfig:
         """Get predefined configuration profiles."""
         profiles = {
             'gentle': cls(
+                processing_level='gentle',
                 filter_order=2,
                 filter_width_multiplier=0.8,
                 noise_level=0.0005,
@@ -547,6 +554,7 @@ class ProcessingConfig:
                 enable_harmonic_adjustments=False,  # Skip most aggressive processing
             ),
             'moderate': cls(
+                processing_level='moderate',
                 filter_order=3,
                 filter_width_multiplier=1.2,
                 noise_level=0.0008,
@@ -559,6 +567,7 @@ class ProcessingConfig:
                 timing_variation_range=0.008,  # ±0.8%
             ),
             'aggressive': cls(
+                processing_level='aggressive',
                 filter_order=4,
                 filter_width_multiplier=1.5,
                 noise_level=0.001,
@@ -571,6 +580,7 @@ class ProcessingConfig:
                 timing_variation_range=0.01,  # ±1%
             ),
             'extreme': cls(
+                processing_level='extreme',
                 filter_order=6,
                 filter_width_multiplier=2.0,
                 noise_level=0.002,
@@ -620,6 +630,7 @@ class AudioFingerprint:
         self.analysis = AdvancedAudioAnalysis()
         self.processor = AudioProcessor(config)
         self._cache = {}  # Cache for expensive computations
+        self.suno_detector = SunoWatermarkDetector()  # Enhanced Suno detection
     
     def detect_spectral_watermarks(self, audio_data: np.ndarray, sample_rate: int) -> List[Dict[str, Any]]:
         """Detect potential spectral watermarks in the audio using advanced analysis."""
@@ -746,6 +757,14 @@ class AudioFingerprint:
         except Exception as e:
             logger.error(f"Spectral watermark detection failed: {e}")
             
+        # Enhanced Suno-specific detection
+        try:
+            suno_watermarks = self.suno_detector.detect_suno_watermarks(audio_analysis, analysis_sr)
+            detected.extend(suno_watermarks)
+            logger.info(f"Suno detector found {len(suno_watermarks)} additional watermarks")
+        except Exception as e:
+            logger.warning(f"Suno detector failed: {e}")
+        
         # Cache the results for future use
         self._cache[cache_key] = detected
         
@@ -1202,6 +1221,17 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
         
     result = audio.copy()
     processor = AudioProcessor(config)
+    suno_detector = SunoWatermarkDetector()
+    aggressive_remover = AggressiveWatermarkRemover()
+    
+    # Initialize SOTA remover based on processing level
+    quality_mode = "conservative"
+    if config.processing_level == "aggressive":
+        quality_mode = "balanced"
+    elif config.processing_level == "extreme":
+        quality_mode = "aggressive"
+    
+    sota_remover = StateOfTheArtWatermarkRemover(quality_preservation_mode=quality_mode)
     
     # Group watermarks by frequency range to optimize filtering
     freq_ranges = []
@@ -1263,6 +1293,34 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
         
         # Add the noise
         result += shaped_noise
+    
+    # Apply enhanced Suno-specific removal
+    try:
+        suno_watermarks = [w for w in watermarks if w.get('method') in [
+            'neural_pattern_analysis', 'frequency_analysis', 'energy_comparison',
+            'temporal_analysis', 'phase_analysis', 'statistical_analysis'
+        ]]
+        
+        if suno_watermarks:
+            logger.debug(f"Applying enhanced Suno removal for {len(suno_watermarks)} watermarks")
+            result = suno_detector.remove_suno_watermarks(result, sr, suno_watermarks)
+    except Exception as e:
+        logger.warning(f"Enhanced Suno removal failed: {e}")
+    
+    # Apply SOTA removal for comprehensive watermark elimination
+    try:
+        logger.info(f"Applying SOTA removal for {len(watermarks)} detected watermarks")
+        result = sota_remover.remove_watermarks_sota(result, sr, watermarks)
+    except Exception as e:
+        logger.warning(f"SOTA removal failed: {e}")
+        
+        # Fallback to aggressive removal if SOTA fails
+        if len(watermarks) > 50:
+            try:
+                logger.info(f"Falling back to aggressive removal")
+                result = aggressive_remover.remove_watermarks_aggressive(result, sr, watermarks)
+            except Exception as e:
+                logger.warning(f"Aggressive removal fallback failed: {e}")
     
     return result
 
