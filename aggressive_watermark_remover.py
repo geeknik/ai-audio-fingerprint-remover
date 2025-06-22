@@ -18,12 +18,13 @@ class AggressiveWatermarkRemover:
     """Aggressive watermark removal system for AI audio."""
     
     def __init__(self):
-        # More aggressive removal parameters (but not destructive)
+        # Balanced removal parameters that preserve audio quality
         self.removal_strength = {
-            'frequency_notch': 0.70,  # Remove 70% of energy in watermark frequencies
-            'spectral_gating': 0.60,  # Moderate spectral gating
-            'temporal_smoothing': 0.5,  # Moderate temporal smoothing
-            'phase_randomization': 0.3,  # Light phase randomization
+            'frequency_notch': 0.30,  # Remove 30% of energy in watermark frequencies
+            'spectral_gating': 0.25,  # Light spectral gating
+            'temporal_smoothing': 0.2,  # Light temporal smoothing
+            'phase_randomization': 0.15,  # Very light phase randomization
+            'pattern_disruption': 0.4,  # Focus on pattern disruption instead
         }
         
         # Suno-specific frequency ranges for aggressive removal
@@ -50,42 +51,129 @@ class AggressiveWatermarkRemover:
         
         logger.info(f"Applying aggressive removal to {len(watermarks)} watermarks")
         
+        # Store original for fallback
+        original = result.copy()
+        
         # 1. Aggressive frequency domain removal
         try:
-            result = self._aggressive_frequency_removal(result, sr, watermarks)
-            result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+            temp_result = self._aggressive_frequency_removal(result, sr, watermarks)
+            if np.any(np.abs(temp_result) > 1e-10):  # Validate result isn't silent
+                result = self._safe_nan_cleanup(temp_result, result)
+            else:
+                logger.warning("Frequency removal produced silence, skipping")
         except Exception as e:
             logger.warning(f"Frequency removal failed: {e}")
         
         # 2. Spectral subtraction for neural patterns
         try:
-            result = self._spectral_subtraction(result, sr, watermarks)
-            result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+            temp_result = self._spectral_subtraction(result, sr, watermarks)
+            if np.any(np.abs(temp_result) > 1e-10):  # Validate result isn't silent
+                result = self._safe_nan_cleanup(temp_result, result)
+            else:
+                logger.warning("Spectral subtraction produced silence, skipping")
         except Exception as e:
             logger.warning(f"Spectral subtraction failed: {e}")
         
         # 3. Adaptive filtering
         try:
-            result = self._adaptive_filtering(result, sr, watermarks)
-            result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+            temp_result = self._adaptive_filtering(result, sr, watermarks)
+            if np.any(np.abs(temp_result) > 1e-10):  # Validate result isn't silent
+                result = self._safe_nan_cleanup(temp_result, result)
+            else:
+                logger.warning("Adaptive filtering produced silence, skipping")
         except Exception as e:
             logger.warning(f"Adaptive filtering failed: {e}")
         
         # 4. Phase manipulation
         try:
-            result = self._phase_manipulation(result, sr, watermarks)
-            result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+            temp_result = self._phase_manipulation(result, sr, watermarks)
+            if np.any(np.abs(temp_result) > 1e-10):  # Validate result isn't silent
+                result = self._safe_nan_cleanup(temp_result, result)
+            else:
+                logger.warning("Phase manipulation produced silence, skipping")
         except Exception as e:
             logger.warning(f"Phase manipulation failed: {e}")
         
         # 5. Temporal pattern disruption
         try:
-            result = self._temporal_pattern_disruption(result, sr, watermarks)
-            result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+            temp_result = self._temporal_pattern_disruption(result, sr, watermarks)
+            if np.any(np.abs(temp_result) > 1e-10):  # Validate result isn't silent
+                result = self._safe_nan_cleanup(temp_result, result)
+            else:
+                logger.warning("Temporal disruption produced silence, skipping")
         except Exception as e:
             logger.warning(f"Temporal disruption failed: {e}")
         
+        # Final validation - if all processing failed, return original
+        if not np.any(np.abs(result) > 1e-10):
+            logger.warning("All processing steps failed, returning original audio")
+            result = original
+        
+        # Apply AI detection evasion techniques
+        try:
+            result = self.add_ai_detection_evasion(result, sr)
+            logger.info("Applied AI detection evasion techniques")
+        except Exception as e:
+            logger.warning(f"AI detection evasion failed: {e}")
+        
         return result
+    
+    def _safe_nan_cleanup(self, processed_audio: np.ndarray, fallback_audio: np.ndarray) -> np.ndarray:
+        """Safely clean NaN/inf values without zeroing the entire signal."""
+        # Check for NaN/inf values
+        has_nan = np.any(np.isnan(processed_audio))
+        has_inf = np.any(np.isinf(processed_audio))
+        
+        if not (has_nan or has_inf):
+            return processed_audio  # No cleanup needed
+        
+        logger.warning(f"Cleaning NaN/inf values: NaN={has_nan}, Inf={has_inf}")
+        
+        # Create mask for valid samples
+        valid_mask = np.isfinite(processed_audio)
+        
+        # If we have valid samples, only replace invalid ones
+        if np.any(valid_mask):
+            result = processed_audio.copy()
+            
+            # Replace NaN/inf with interpolated values from nearby valid samples
+            if has_nan or has_inf:
+                invalid_indices = ~valid_mask
+                if np.sum(invalid_indices) < len(processed_audio) * 0.5:  # Less than 50% invalid
+                    # Linear interpolation for scattered invalid samples
+                    valid_indices = np.where(valid_mask)[0]
+                    invalid_indices_pos = np.where(invalid_indices)[0]
+                    
+                    for invalid_idx in invalid_indices_pos:
+                        # Find nearest valid samples
+                        left_valid = valid_indices[valid_indices < invalid_idx]
+                        right_valid = valid_indices[valid_indices > invalid_idx]
+                        
+                        if len(left_valid) > 0 and len(right_valid) > 0:
+                            # Interpolate between nearest valid samples
+                            left_idx = left_valid[-1]
+                            right_idx = right_valid[0]
+                            alpha = (invalid_idx - left_idx) / (right_idx - left_idx)
+                            result[invalid_idx] = (1 - alpha) * result[left_idx] + alpha * result[right_idx]
+                        elif len(left_valid) > 0:
+                            # Use nearest left sample
+                            result[invalid_idx] = result[left_valid[-1]]
+                        elif len(right_valid) > 0:
+                            # Use nearest right sample
+                            result[invalid_idx] = result[right_valid[0]]
+                        else:
+                            # Last resort - use fallback
+                            result[invalid_idx] = fallback_audio[invalid_idx] if invalid_idx < len(fallback_audio) else 0.0
+                else:
+                    # Too many invalid samples, return fallback
+                    logger.warning("Too many invalid samples, using fallback audio")
+                    return fallback_audio
+            
+            return result
+        else:
+            # All samples are invalid, return fallback
+            logger.warning("All samples invalid, using fallback audio")
+            return fallback_audio
     
     def _aggressive_frequency_removal(self, audio: np.ndarray, sr: int, 
                                     watermarks: List[Dict[str, Any]]) -> np.ndarray:
@@ -102,10 +190,14 @@ class AggressiveWatermarkRemover:
             low_norm = low_freq / nyquist
             high_norm = min(high_freq, nyquist - 1) / nyquist
             
-            if 0 < low_norm < high_norm < 1.0:
+            if 0 < low_norm < high_norm < 1.0 and len(result) > 100:  # Ensure minimum length
                 try:
-                    # Use higher order filter for more aggressive removal
-                    b, a = signal.butter(8, [low_norm, high_norm], btype='bandstop')
+                    # Use lower order filter to avoid length issues
+                    filter_order = min(6, len(result) // 20)  # Adaptive order based on length
+                    if filter_order < 2:
+                        continue  # Skip if audio too short
+                    
+                    b, a = signal.butter(filter_order, [low_norm, high_norm], btype='bandstop')
                     filtered = signal.filtfilt(b, a, result)
                     
                     # Blend based on strength
@@ -129,13 +221,18 @@ class AggressiveWatermarkRemover:
             low_norm = low_freq / (sr/2)
             high_norm = high_freq / (sr/2)
             
-            if 0 < low_norm < high_norm < 1.0:
+            if 0 < low_norm < high_norm < 1.0 and len(result) > 100:  # Ensure minimum length
                 try:
-                    b, a = signal.butter(6, [low_norm, high_norm], btype='bandstop')
+                    # Use adaptive filter order
+                    filter_order = min(4, len(result) // 25)  # Conservative order
+                    if filter_order < 2:
+                        continue  # Skip if audio too short
+                    
+                    b, a = signal.butter(filter_order, [low_norm, high_norm], btype='bandstop')
                     filtered = signal.filtfilt(b, a, result)
                     
-                    # Strength based on confidence
-                    strength = min(confidence * 0.9, 0.95)
+                    # Strength based on confidence but capped to preserve audio
+                    strength = min(confidence * 0.3, 0.5)  # Much more conservative
                     result = (1 - strength) * result + strength * filtered
                     
                 except Exception as e:
@@ -317,6 +414,100 @@ class AggressiveWatermarkRemover:
                 continue
         
         return result
+    
+    def add_ai_detection_evasion(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Add subtle modifications to evade AI detection systems."""
+        result = audio.copy()
+        
+        # 1. Add micro-variations in timing (not perceptible but breaks AI patterns)
+        result = self._add_micro_timing_variations(result, sr)
+        
+        # 2. Add subtle harmonic content variations
+        result = self._add_harmonic_variations(result, sr)
+        
+        # 3. Add naturalistic noise in quiet sections
+        result = self._add_naturalistic_noise(result, sr)
+        
+        return result
+    
+    def _add_micro_timing_variations(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Add extremely subtle timing variations to break AI detection patterns."""
+        # Very small pitch shifts that create timing-like variations
+        pitch_shift_cents = np.random.uniform(-3, 3)  # Tiny pitch variation
+        
+        try:
+            # Use librosa's pitch shift which preserves length
+            shifted = librosa.effects.pitch_shift(audio, sr=sr, n_steps=pitch_shift_cents/100)
+            
+            # Blend very subtly with original
+            blend_factor = 0.05  # Almost imperceptible
+            result = (1 - blend_factor) * audio + blend_factor * shifted
+            
+            return result
+        except Exception as e:
+            logger.debug(f"Micro timing variation failed: {e}")
+            return audio
+    
+    def _add_harmonic_variations(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Add subtle harmonic content variations to break spectral patterns."""
+        try:
+            # Get spectral representation
+            stft = librosa.stft(audio, n_fft=2048, hop_length=512)
+            magnitude = np.abs(stft)
+            phase = np.angle(stft)
+            
+            # Add very subtle variations to harmonic content
+            freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+            
+            # Focus on mid frequencies where harmonics are important
+            mid_freq_mask = (freqs >= 200) & (freqs <= 5000)
+            
+            if np.any(mid_freq_mask):
+                # Add tiny random variations to magnitude
+                noise_factor = 0.02  # 2% variation
+                for i in np.where(mid_freq_mask)[0]:
+                    magnitude[i] *= (1 + np.random.uniform(-noise_factor, noise_factor, magnitude.shape[1]))
+            
+            # Reconstruct
+            stft_modified = magnitude * np.exp(1j * phase)
+            result = librosa.istft(stft_modified, hop_length=512)
+            
+            # Ensure same length
+            if len(result) != len(audio):
+                if len(result) > len(audio):
+                    result = result[:len(audio)]
+                else:
+                    result = np.pad(result, (0, len(audio) - len(result)), mode='constant')
+            
+            return result
+            
+        except Exception as e:
+            logger.debug(f"Harmonic variation failed: {e}")
+            return audio
+    
+    def _add_naturalistic_noise(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Add naturalistic noise in quiet sections to break AI silence patterns."""
+        # Find quiet sections
+        rms = librosa.feature.rms(y=audio, frame_length=2048, hop_length=512)[0]
+        quiet_threshold = np.percentile(rms, 20)  # Bottom 20% of energy
+        
+        # Upsample RMS to match audio length
+        time_frames = librosa.frames_to_samples(np.arange(len(rms)), hop_length=512)
+        quiet_mask = np.interp(np.arange(len(audio)), time_frames, rms < quiet_threshold)
+        quiet_mask = quiet_mask > 0.5
+        
+        if np.any(quiet_mask):
+            # Generate very subtle background noise
+            noise_level = np.std(audio) * 0.001  # Extremely quiet noise
+            noise = np.random.randn(len(audio)) * noise_level
+            
+            # Apply noise only to quiet sections
+            result = audio.copy()
+            result[quiet_mask] += noise[quiet_mask]
+            
+            return result
+        
+        return audio
 
 def main():
     """Test the aggressive watermark remover."""

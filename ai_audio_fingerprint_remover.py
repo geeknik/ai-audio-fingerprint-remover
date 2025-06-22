@@ -1198,13 +1198,33 @@ def remove_spectral_watermarks(audio_path: str, output_path: str,
     
     # Process stereo or mono based on input
     if is_stereo:
-        processed = np.zeros_like(y)
+        processed = y.copy()  # Start with original audio instead of zeros
         
         # Process each channel separately
         for i in range(y.shape[0]):
-            processed[i] = apply_watermark_removal(y[i], sr, watermarks, detector.config)
+            channel_result = apply_watermark_removal(y[i], sr, watermarks, detector.config)
+            # Validate channel result before assignment
+            if np.any(np.abs(channel_result) > 1e-10):  # Check if not completely silent
+                processed[i] = channel_result
+            else:
+                logger.warning(f"Channel {i} processing resulted in silence, keeping original")
+                processed[i] = y[i]  # Keep original if processing failed
     else:
         processed = apply_watermark_removal(y, sr, watermarks, detector.config)
+        # Validate mono result
+        if not np.any(np.abs(processed) > 1e-10):  # Check if not completely silent
+            logger.warning("Mono processing resulted in silence, keeping original")
+            processed = y  # Keep original if processing failed
+    
+    # Final validation before saving
+    if not np.any(np.abs(processed) > 1e-10):
+        logger.error("Final processed audio is silent, keeping original")
+        processed = y
+    
+    # Normalize to prevent clipping but preserve dynamics
+    max_val = np.max(np.abs(processed))
+    if max_val > 0.95:
+        processed = processed * (0.95 / max_val)
     
     # Save the processed audio
     sf.write(output_path, processed.T if is_stereo else processed, sr)
