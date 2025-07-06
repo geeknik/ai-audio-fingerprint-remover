@@ -37,10 +37,6 @@ from typing import Optional, List, Dict, Any, Tuple, Union, Set
 from dataclasses import dataclass
 import uuid
 import warnings
-from audio_processing_fixes import (
-    AudioProcessingFixes, WatermarkRemovalFixes, AudioQualityEnhancer
-)
-
 
 # Suppress librosa warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
@@ -52,11 +48,7 @@ except ImportError:
 
 try:
     import numpy as np
-    # Use optimized version for better performance
-    try:
-        from optimized_suno_detector import OptimizedSunoWatermarkDetector as SunoWatermarkDetector
-    except ImportError:
-        from enhanced_suno_detector import SunoWatermarkDetector
+    from enhanced_suno_detector import SunoWatermarkDetector
     from aggressive_watermark_remover import AggressiveWatermarkRemover
     from sota_watermark_remover import StateOfTheArtWatermarkRemover
     from scipy import signal, stats
@@ -536,15 +528,15 @@ class ProcessingConfig:
     # Watermark removal parameters
     filter_order: int = 2  # Order of bandstop filters (reduced for stability)
     filter_width_multiplier: float = 1.0  # How wide to make the filter bands (reduced)
-    noise_level: float = 0.00001  # Level of noise added to high frequencies (reduced 10x)
+    noise_level: float = 0.0001  # Level of noise added to high frequencies (reduced 10x)
     skip_low_freq_threshold: int = 200  # Skip filters below this frequency (increased)
     
     # Pattern normalization parameters
-    timing_stretch_range: float = 0.001  # ±percentage for time stretching (reduced from 2% to 0.5%)
-    distribution_noise_level: float = 0.00001  # Noise added for distribution normalization (reduced 10x)
-    harmonic_distortion_amount: float = 0.002  # Amount of soft clipping (reduced)
+    timing_stretch_range: float = 0.005  # ±percentage for time stretching (reduced from 2% to 0.5%)
+    distribution_noise_level: float = 0.0001  # Noise added for distribution normalization (reduced 10x)
+    harmonic_distortion_amount: float = 0.01  # Amount of soft clipping (reduced)
     phase_variance: float = 0.005  # Phase adjustment amount (reduced)
-    micro_dynamics_amount: float = 0.0001  # Micro-dynamics variation amount (reduced)
+    micro_dynamics_amount: float = 0.001  # Micro-dynamics variation amount (reduced)
     
     # Timing variations parameters
     timing_variation_range: float = 0.002  # Random variation range (reduced from 1% to 0.2%)
@@ -937,9 +929,39 @@ class AudioFingerprint:
         return detected
 
 
-def validate_audio_content(audio: np.ndarray, min_amplitude: float = 1e-10, context: str = "") -> bool:
-    """Use enhanced validation from AudioProcessingFixes."""
-    return AudioProcessingFixes.validate_audio_content(audio, min_amplitude, context)
+def validate_audio_content(audio: np.ndarray, min_amplitude: float = 1e-10) -> bool:
+    """
+    Validate that audio contains actual content (not silent or corrupted).
+    
+    Args:
+        audio: Audio array to validate
+        min_amplitude: Minimum amplitude threshold
+        
+    Returns:
+        True if audio is valid, False otherwise
+    """
+    if audio is None or len(audio) == 0:
+        return False
+    
+    # Check for NaN or inf values
+    if np.any(np.isnan(audio)) or np.any(np.isinf(audio)):
+        return False
+    
+    # Check maximum amplitude
+    max_amp = np.max(np.abs(audio))
+    if max_amp < min_amplitude:
+        return False
+    
+    # Check RMS (root mean square) - more robust than just max
+    rms = np.sqrt(np.mean(audio**2))
+    if rms < min_amplitude / 10:  # RMS threshold lower than peak
+        return False
+    
+    # Check for all zeros
+    if np.all(audio == 0):
+        return False
+    
+    return True
 
 
 def get_ai_metadata_signatures() -> Set[str]:
@@ -1261,41 +1283,145 @@ def remove_spectral_watermarks(audio_path: str, output_path: str,
 def apply_watermark_removal(audio: np.ndarray, sr: int, 
                            watermarks: List[Dict[str, Any]], 
                            config: ProcessingConfig) -> np.ndarray:
-    """Apply filters to remove detected watermarks with enhanced safety."""
+    """Apply filters to remove detected watermarks."""
     if not config.enable_watermark_removal:
         return audio
-    
+        
     result = audio.copy()
+    processor = AudioProcessor(config)
+    suno_detector = SunoWatermarkDetector()
+    aggressive_remover = AggressiveWatermarkRemover()
     
-    # Group watermarks by frequency range
+    # Initialize SOTA remover based on processing level
+    quality_mode = "conservative"
+    if config.processing_level == "aggressive":
+        quality_mode = "balanced"
+    elif config.processing_level == "extreme":
+        quality_mode = "aggressive"
+    
+    sota_remover = StateOfTheArtWatermarkRemover(quality_preservation_mode=quality_mode)
+    
+    # Group watermarks by frequency range to optimize filtering
     freq_ranges = []
     for watermark in watermarks:
         freq_range = watermark.get('freq_range')
         if freq_range and freq_range not in freq_ranges:
             freq_ranges.append(freq_range)
     
-    # Use conservative frequency removal
-    if freq_ranges:
-        result = WatermarkRemovalFixes.conservative_frequency_removal(
-            result, sr, freq_ranges, max_attenuation_db=20
-        )
+    logger.debug(f"Applying filters for {len(freq_ranges)} frequency ranges")
     
-    # Apply psychoacoustic watermark removal for high-frequency watermarks
-    high_freq_watermarks = [
-        w.get('freq_range', [0, 0])[0] 
-        for w in watermarks 
-        if w.get('freq_range') and w['freq_range'][0] > 15000
-    ]
+    for freq_range in freq_ranges:
+        low_freq, high_freq = freq_range
+        
+        # Convert to normalized frequency
+        nyquist = sr / 2
+        low_norm = low_freq / nyquist
+        high_norm = high_freq / nyquist
+        
+        # Skip if outside Nyquist range
+        if high_norm > 1.0:
+            continue
+            
+        # Skip very low frequency filters that can cause numerical instability
+        if low_freq < config.skip_low_freq_threshold:
+            continue
+            
+        # Check if audio is long enough for filtering
+        min_samples_needed = config.filter_order * 3
+        if len(result) < min_samples_needed:
+            logger.warning(f"Audio too short ({len(result)} samples) for filter order {config.filter_order}")
+            continue
+            
+        # Use adaptive filter design for better performance
+        try:
+            filter_result = processor.adaptive_filter_design(result, sr, freq_range)
+            if filter_result[0] is None or filter_result[1] is None:
+                logger.warning(f"Failed to design filter for range {freq_range}, skipping")
+                continue
+            
+            b, a = filter_result
+            
+            # Check filter stability
+            if not np.all(np.abs(np.roots(a)) < 1.0):
+                logger.warning(f"Filter for range {freq_range} is unstable, skipping")
+                continue
+            
+            # Apply the filter with error checking
+            filtered = signal.filtfilt(b, a, result)
+            
+            # Check for numerical issues
+            if np.any(np.isnan(filtered)) or np.any(np.isinf(filtered)):
+                logger.warning(f"Filter for range {freq_range} produced invalid values, skipping")
+                continue
+            
+            # Validate filtered audio still has content
+            if not validate_audio_content(filtered):
+                logger.warning(f"Filter for range {freq_range} removed too much content, skipping")
+                continue
+            
+            # Blend with original to preserve quality
+            blend_factor = 0.7  # Apply 70% of the filter effect
+            result = (1 - blend_factor) * result + blend_factor * filtered
+            logger.debug(f"Applied filter for frequency range {freq_range} with {blend_factor:.0%} blend")
+            
+        except Exception as e:
+            logger.warning(f"Failed to apply filter for range {freq_range}: {e}")
+            continue
     
-    if high_freq_watermarks:
-        result = WatermarkRemovalFixes.psychoacoustic_watermark_removal(
-            result, sr, high_freq_watermarks
-        )
+    # If we're removing high-frequency watermarks, add a very small amount of noise
+    # to defeat fingerprinting that relies on absence of higher frequencies
+    high_watermarks = [w for w in watermarks if w.get('freq_range') and w['freq_range'][0] > 15000]
     
-    # Validate result
-    if not AudioProcessingFixes.validate_audio_content(result, context="Watermark removal"):
-        logger.warning("Watermark removal failed validation, returning original")
-        return audio
+    if high_watermarks and config.noise_level > 0:
+        # Generate a very small amount of shaped noise
+        noise = np.random.randn(len(result)) * config.noise_level
+        
+        # Shape the noise to only affect high frequencies
+        nyquist = sr / 2
+        cutoff = 18000 / nyquist  # Only affect very high frequencies
+        
+        if cutoff < 1.0:  # Ensure valid cutoff
+            try:
+                b, a = signal.butter(2, cutoff, btype='highpass')
+                # Check filter stability
+                if np.all(np.abs(np.roots(a)) < 1.0):
+                    shaped_noise = signal.filtfilt(b, a, noise)
+                    
+                    # Add the noise with conservative blending
+                    blend_factor = 0.1  # Only 10% of the shaped noise
+                    result += shaped_noise * blend_factor
+                else:
+                    logger.debug("High-pass filter for noise shaping is unstable, skipping")
+            except Exception as e:
+                logger.debug(f"Failed to add shaped noise: {e}")
+    
+    # Apply enhanced Suno-specific removal
+    try:
+        suno_watermarks = [w for w in watermarks if w.get('method') in [
+            'neural_pattern_analysis', 'frequency_analysis', 'energy_comparison',
+            'temporal_analysis', 'phase_analysis', 'statistical_analysis'
+        ]]
+        
+        if suno_watermarks:
+            logger.debug(f"Applying enhanced Suno removal for {len(suno_watermarks)} watermarks")
+            result = suno_detector.remove_suno_watermarks(result, sr, suno_watermarks)
+    except Exception as e:
+        logger.warning(f"Enhanced Suno removal failed: {e}")
+    
+    # Apply SOTA removal for comprehensive watermark elimination
+    try:
+        logger.info(f"Applying SOTA removal for {len(watermarks)} detected watermarks")
+        result = sota_remover.remove_watermarks_sota(result, sr, watermarks)
+    except Exception as e:
+        logger.warning(f"SOTA removal failed: {e}")
+        
+        # Fallback to aggressive removal if SOTA fails
+        if len(watermarks) > 50:
+            try:
+                logger.info(f"Falling back to aggressive removal")
+                result = aggressive_remover.remove_watermarks_aggressive(result, sr, watermarks)
+            except Exception as e:
+                logger.warning(f"Aggressive removal fallback failed: {e}")
     
     return result
 
@@ -1691,22 +1817,102 @@ def add_timing_variations(audio: np.ndarray, sr: int, config: ProcessingConfig) 
     """Add subtle timing variations to make AI-generated audio sound more natural."""
     if not config.enable_timing_variations:
         return audio
-    
-    # Use quality enhancer for natural variations
-    result = AudioQualityEnhancer.add_natural_variations(
-        audio, sr, variation_amount=config.timing_variation_range
-    )
-    
-    # Add harmonic enhancement for more natural sound
-    if config.enable_harmonic_adjustments:
-        result = AudioQualityEnhancer.harmonic_enhancement(
-            result, sr, enhancement_amount=config.harmonic_distortion_amount
-        )
-    
-    # Final validation
-    if not AudioProcessingFixes.validate_audio_content(result, context="Timing variations"):
-        logger.warning("Timing variations failed validation, returning original")
+        
+    # Only apply if audio is long enough
+    if len(audio) < sr:  # Less than 1 second
         return audio
+        
+    # Adaptive segment sizing based on audio characteristics
+    # Shorter segments for more complex audio, longer for simpler
+    base_segment_size = sr // 4  # ~250ms base
+    
+    # Analyze audio complexity to determine optimal segment size
+    try:
+        # Simple complexity measure: standard deviation of differences
+        complexity = np.std(np.diff(audio[:min(sr*10, len(audio))]))  # Sample first 10 seconds
+        if complexity > 0.01:  # High complexity audio
+            segment_size = max(sr // 8, base_segment_size // 2)  # Smaller segments
+        else:  # Lower complexity audio
+            segment_size = min(sr // 2, base_segment_size * 2)  # Larger segments
+    except:
+        segment_size = base_segment_size
+    
+    hop_size = int(segment_size * (1 - config.segment_overlap_ratio))
+    
+    # Calculate number of segments
+    num_segments = (len(audio) - segment_size) // hop_size + 1
+    
+    # If too few segments, just return original
+    if num_segments < 3:
+        return audio
+    
+    # Initialize output array with proper overlap handling
+    result = np.zeros(len(audio))
+    normalization_weights = np.zeros(len(audio))
+    
+    # Use a better window function for smoother transitions
+    window = get_hann_window(segment_size)
+    
+    logger.debug(f"Processing {num_segments} segments of {segment_size/sr:.3f}s each")
+    
+    # Process each segment with slight random variations
+    for i in range(num_segments):
+        start = i * hop_size
+        end = min(start + segment_size, len(audio))
+        actual_segment_size = end - start
+        
+        if actual_segment_size < sr // 20:  # Skip very small segments (<50ms)
+            continue
+            
+        segment = audio[start:end].copy()
+        
+        # Random micro-timing adjustment based on config
+        variation_range = config.timing_variation_range
+        random_var = 1.0 + (2 * variation_range * (random.random() - 0.5))
+        
+        # Apply subtle time stretching using librosa for better quality
+        try:
+            # Only apply if variation is significant enough
+            if abs(random_var - 1.0) > 0.001:
+                adjusted = librosa.effects.time_stretch(segment, rate=1.0/random_var)
+            else:
+                adjusted = segment
+        except:
+            # Fallback to simple interpolation if librosa fails
+            indices = np.arange(0, len(segment), random_var)
+            indices = indices[indices < len(segment)]
+            if len(indices) > 1:
+                adjusted = np.interp(np.arange(len(segment)), indices, segment[np.floor(indices).astype(int)])
+            else:
+                adjusted = segment
+        
+        # Ensure the adjusted segment fits
+        if len(adjusted) > actual_segment_size:
+            adjusted = adjusted[:actual_segment_size]
+        elif len(adjusted) < actual_segment_size:
+            adjusted = np.pad(adjusted, (0, actual_segment_size - len(adjusted)))
+        
+        # Apply appropriate window
+        if len(adjusted) == segment_size:
+            windowed = adjusted * window
+        else:
+            # Create appropriate window for actual size
+            actual_window = get_hann_window(len(adjusted))
+            windowed = adjusted * actual_window
+        
+        # Add to result with overlap handling
+        result[start:start+len(windowed)] += windowed
+        normalization_weights[start:start+len(windowed)] += actual_window if len(adjusted) != segment_size else window
+    
+    # Normalize by window overlap
+    mask = normalization_weights > 0.001
+    result[mask] = result[mask] / normalization_weights[mask]
+    
+    # Final RMS normalization to preserve energy
+    input_rms = np.sqrt(np.mean(audio**2))
+    output_rms = np.sqrt(np.mean(result**2))
+    if output_rms > 0:
+        result = result * (input_rms / output_rms)
     
     return result
 

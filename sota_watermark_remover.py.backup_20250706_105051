@@ -18,8 +18,6 @@ import logging
 from typing import Dict, List, Tuple, Any, Optional
 import warnings
 warnings.filterwarnings('ignore')
-from audio_processing_fixes import AudioProcessingFixes, WatermarkRemovalFixes
-
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +59,11 @@ class StateOfTheArtWatermarkRemover:
                 "compression_bitrates": [32, 64],
             },
             "conservative": {
-                "pitch_shift_cents": [5, 10],
-                "time_stretch_factors": [0.98, 1.02],
+                "pitch_shift_cents": [10, 25],
+                "time_stretch_factors": [0.95, 1.05],
                 "high_pass_cutoffs": [100, 200],
                 "low_pass_cutoffs": [5000, 8000],
-                "sample_suppression_rates": [0.0005, 0.001],
+                "sample_suppression_rates": [0.001, 0.005],
                 "resampling_rates": [16000, 22050],
                 "noise_snr_db": [40, 50],
                 "compression_bitrates": [64, 128],
@@ -148,26 +146,46 @@ class StateOfTheArtWatermarkRemover:
         return result
     
     def _validate_and_normalize_audio(self, audio: np.ndarray) -> np.ndarray:
-        """Validate and normalize audio input with enhanced safety."""
-        # Use enhanced NaN cleanup
-        audio = AudioProcessingFixes.safe_nan_cleanup(audio)
-        
-        # Validate audio content
-        if not AudioProcessingFixes.validate_audio_content(audio, context="SOTA input validation"):
-            logger.error("Input audio validation failed")
-            raise ValueError("Invalid audio input")
+        """Validate and normalize audio input."""
+        # Handle NaN and infinite values more carefully
+        if np.any(np.isnan(audio)) or np.any(np.isinf(audio)):
+            logger.warning("Found NaN or inf values in audio, attempting to fix")
+            # Create mask of valid samples
+            valid_mask = np.isfinite(audio)
+            if np.any(valid_mask):
+                # Interpolate invalid samples from valid ones
+                if len(audio.shape) == 1:  # Mono
+                    valid_indices = np.where(valid_mask)[0]
+                    invalid_indices = np.where(~valid_mask)[0]
+                    if len(valid_indices) > 1 and len(invalid_indices) < len(audio) * 0.1:
+                        # Less than 10% invalid - interpolate
+                        audio[invalid_indices] = np.interp(invalid_indices, valid_indices, audio[valid_indices])
+                    else:
+                        # Too many invalid samples - use nan_to_num as fallback
+                        audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+                else:  # Stereo
+                    for ch in range(audio.shape[0]):
+                        valid_ch = valid_mask[ch] if len(valid_mask.shape) > 1 else valid_mask
+                        valid_indices = np.where(valid_ch)[0]
+                        invalid_indices = np.where(~valid_ch)[0]
+                        if len(valid_indices) > 1 and len(invalid_indices) < len(audio[ch]) * 0.1:
+                            audio[ch, invalid_indices] = np.interp(invalid_indices, valid_indices, audio[ch, valid_indices])
+                        else:
+                            audio[ch] = np.nan_to_num(audio[ch], nan=0.0, posinf=0.0, neginf=0.0)
+            else:
+                # No valid samples at all
+                logger.error("No valid samples found in audio")
+                audio = np.zeros_like(audio)
         
         # Convert to mono if stereo
         if len(audio.shape) > 1:
             audio = np.mean(audio, axis=0)
         
         # Normalize to prevent clipping
-        max_val = np.max(np.abs(audio))
-        if max_val > 0:
-            audio = audio / max_val * 0.95
+        if np.max(np.abs(audio)) > 0:
+            audio = audio / np.max(np.abs(audio)) * 0.95
         
         return audio
-
     
     def _compute_psychoacoustic_masking(self, audio: np.ndarray, sr: int) -> np.ndarray:
         """Compute psychoacoustic masking threshold for quality preservation."""
