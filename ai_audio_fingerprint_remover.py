@@ -1533,6 +1533,13 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
     
     logger.info(f"Starting processing with {level} level for file: {os.path.basename(input_path)}")
     start_time = time.time()
+
+    # Load original audio once for safety validation (fallback if processing harms content)
+    try:
+        original_audio, original_sr = librosa.load(input_path, sr=None, mono=False)
+    except Exception as load_error:
+        logger.warning(f"Unable to load original audio for validation: {load_error}")
+        original_audio, original_sr = None, None
     
     # Memory monitoring
     if psutil:
@@ -1644,6 +1651,30 @@ def process_audio(input_path: str, output_path: Optional[str] = None,
                         logger.warning("Timing variation failed, keeping original")
                         processed = y
                 
+            # Validate that processing didn't destroy content (e.g., accidental silence)
+            try:
+                processed_rms = np.sqrt(np.mean(processed**2))
+                if original_audio is not None:
+                    original_rms = np.sqrt(np.mean(original_audio**2))
+                    rms_ratio = processed_rms / (original_rms + 1e-12)
+                    if rms_ratio < 0.05:
+                        logger.warning(
+                            f"Processed audio RMS too low ({rms_ratio:.3f}); blending with original to prevent silence"
+                        )
+                        # Match channel layout before blending
+                        if is_stereo and len(original_audio.shape) == 1:
+                            original_audio = np.tile(original_audio, (2, 1))
+                        if not is_stereo and len(original_audio.shape) > 1:
+                            original_audio = np.mean(original_audio, axis=0)
+                        processed = 0.2 * processed + 0.8 * original_audio
+                        processed_rms = np.sqrt(np.mean(processed**2))
+                        logger.info(f"RMS after safety blend: {processed_rms:.6f}")
+                elif processed_rms < 1e-6:
+                    logger.warning("Processed audio nearly silent and no original available; increasing gain")
+                    processed = processed * 10.0
+            except Exception as validation_error:
+                logger.warning(f"Safety validation failed: {validation_error}")
+
             # Save to final output location
             sf.write(output_path, processed.T if is_stereo else processed, sr)
             stats.timing_adjustments = 1
