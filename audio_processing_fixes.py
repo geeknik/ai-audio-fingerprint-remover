@@ -487,6 +487,12 @@ class WatermarkRemovalFixes:
                 for idx in candidate_indices[:max_peaks]
                 if prominence[idx] > min_prominence and persistence[idx] > 0.6
             ]
+            if median_level <= 0:
+                return stft
+
+            prominence = mean_by_bin - median_level
+            candidate_indices = np.argsort(prominence)[::-1]
+            peak_indices = [idx for idx in candidate_indices[:max_peaks] if prominence[idx] > 0]
 
             if not peak_indices:
                 return stft
@@ -505,6 +511,8 @@ class WatermarkRemovalFixes:
                 local_floor = np.median(magnitude[lower:upper, :])
                 dither_scale = max(local_floor * 1e-3, attenuation / 200)
                 dither = np.random.randn(upper - lower, magnitude.shape[1]) * dither_scale
+                # Add low-level noise to avoid perfectly tonal residues
+                dither = np.random.randn(upper - lower, magnitude.shape[1]) * (attenuation / 100)
                 magnitude[lower:upper, :] += dither
 
             return magnitude * np.exp(1j * phase)
