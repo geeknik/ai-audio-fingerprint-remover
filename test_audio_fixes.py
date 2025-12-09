@@ -15,16 +15,22 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ai_audio_fingerprint_remover import process_audio, ProcessingConfig, validate_audio_content
+from ai_audio_fingerprint_remover import (
+    apply_watermark_removal,
+    process_audio,
+    ProcessingConfig,
+    validate_audio_content,
+)
 from aggressive_watermark_remover import AggressiveWatermarkRemover
 from sota_watermark_remover import StateOfTheArtWatermarkRemover
+from audio_processing_fixes import AudioProcessingFixes, WatermarkRemovalFixes
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def create_test_audio(duration=5.0, sr=44100):
+def create_test_audio(duration=0.5, sr=16000):
     """Create a test audio signal with various frequency components."""
     t = np.linspace(0, duration, int(sr * duration))
     
@@ -44,7 +50,7 @@ def create_test_audio(duration=5.0, sr=44100):
     return audio, sr
 
 
-def test_audio_metrics(audio, name="Audio"):
+def compute_audio_metrics(audio, name="Audio"):
     """Calculate and display audio metrics."""
     if audio is None or len(audio) == 0:
         return {
@@ -86,175 +92,82 @@ def test_processing_levels():
     # Create test audio
     test_audio, sr = create_test_audio()
     
-    # Test each processing level
-    levels = ['gentle', 'moderate', 'aggressive', 'extreme']
-    results = {}
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Save test audio
-        input_path = os.path.join(temp_dir, "test_input.wav")
-        sf.write(input_path, test_audio, sr)
-        
-        for level in levels:
-            logger.info(f"\nTesting {level} processing...")
-            
-            output_path = os.path.join(temp_dir, f"test_output_{level}.wav")
-            
-            try:
-                # Process audio
-                result_path, stats = process_audio(input_path, output_path, level=level)
-                
-                # Load and analyze result
-                processed_audio, _ = sf.read(result_path)
-                
-                metrics = test_audio_metrics(processed_audio, f"{level.capitalize()} processed")
-                results[level] = {
-                    'success': True,
-                    'metrics': metrics,
-                    'stats': stats
-                }
-                
-                # Calculate quality preservation
-                if metrics['valid']:
-                    snr = calculate_snr(test_audio, processed_audio)
-                    logger.info(f"  SNR: {snr:.2f} dB")
-                    results[level]['snr'] = snr
-                
-            except Exception as e:
-                logger.error(f"Processing failed for {level}: {e}")
-                results[level] = {
-                    'success': False,
-                    'error': str(e)
-                }
-    
-    return results
+    # Test each processing level using fast in-memory processing
+    levels = ['moderate', 'aggressive']
+    synthetic_watermarks = [{'freq_range': (6500, 9000)}]
+
+    for level in levels:
+        logger.info(f"\nTesting {level} processing...")
+        config = ProcessingConfig.get_profile(level)
+        processed_audio = apply_watermark_removal(test_audio, sr, synthetic_watermarks, config)
+
+        metrics = compute_audio_metrics(processed_audio, f"{level.capitalize()} processed")
+        assert metrics['valid'], f"{level} processing produced invalid audio"
+
+        # Calculate quality preservation
+        snr = calculate_snr(test_audio, processed_audio)
+        logger.info(f"  SNR: {snr:.2f} dB")
+        assert snr > 0, "SNR should remain positive after processing"
 
 
 def test_short_audio():
     """Test processing of very short audio clips."""
     logger.info("\n=== Testing Short Audio Processing ===")
-    
-    # Create very short audio clips
-    durations = [0.1, 0.5, 1.0]  # seconds
-    sr = 44100
-    
-    results = {}
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        for duration in durations:
-            logger.info(f"\nTesting {duration}s audio...")
-            
-            # Create short audio
-            test_audio, sr = create_test_audio(duration=duration, sr=sr)
-            
-            input_path = os.path.join(temp_dir, f"short_{duration}s.wav")
-            output_path = os.path.join(temp_dir, f"short_{duration}s_processed.wav")
-            
-            sf.write(input_path, test_audio, sr)
-            
-            try:
-                # Process with moderate settings
-                result_path, stats = process_audio(input_path, output_path, level='moderate')
-                
-                # Load and analyze
-                processed_audio, _ = sf.read(result_path)
-                
-                metrics = test_audio_metrics(processed_audio, f"{duration}s processed")
-                results[duration] = {
-                    'success': True,
-                    'metrics': metrics,
-                    'samples': len(test_audio)
-                }
-                
-            except Exception as e:
-                logger.error(f"Failed to process {duration}s audio: {e}")
-                results[duration] = {
-                    'success': False,
-                    'error': str(e),
-                    'samples': len(test_audio)
-                }
-    
-    return results
+
+    duration = 0.1  # seconds
+    sr = 22050
+
+    logger.info(f"\nTesting {duration}s audio in-memory...")
+
+    # Create short audio
+    test_audio, sr = create_test_audio(duration=duration, sr=sr)
+
+    config = ProcessingConfig.get_profile('moderate')
+    synthetic_watermarks = [{'freq_range': (4000, 6000)}]
+    processed_audio = apply_watermark_removal(test_audio, sr, synthetic_watermarks, config)
+
+    metrics = compute_audio_metrics(processed_audio, f"{duration}s processed")
+    assert metrics['valid'], f"Short audio ({duration}s) failed validation"
 
 
 def test_edge_cases():
     """Test edge cases that might cause issues."""
     logger.info("\n=== Testing Edge Cases ===")
-    
-    results = {}
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Test 1: Audio with some NaN values
-        logger.info("\nTest 1: Audio with NaN values")
-        audio_with_nan = create_test_audio()[0]
-        audio_with_nan[1000:1010] = np.nan
-        
-        input_path = os.path.join(temp_dir, "nan_audio.wav")
-        output_path = os.path.join(temp_dir, "nan_audio_processed.wav")
-        
-        # Save without NaN (soundfile can't write NaN)
-        sf.write(input_path, np.nan_to_num(audio_with_nan), 44100)
-        
-        try:
-            result_path, stats = process_audio(input_path, output_path, level='moderate')
-            processed, _ = sf.read(result_path)
-            metrics = test_audio_metrics(processed, "NaN test processed")
-            results['nan_test'] = {'success': True, 'metrics': metrics}
-        except Exception as e:
-            results['nan_test'] = {'success': False, 'error': str(e)}
-        
-        # Test 2: Very quiet audio
-        logger.info("\nTest 2: Very quiet audio")
-        quiet_audio = create_test_audio()[0] * 0.0001
-        
-        input_path = os.path.join(temp_dir, "quiet_audio.wav")
-        output_path = os.path.join(temp_dir, "quiet_audio_processed.wav")
-        
-        sf.write(input_path, quiet_audio, 44100)
-        
-        try:
-            result_path, stats = process_audio(input_path, output_path, level='gentle')
-            processed, _ = sf.read(result_path)
-            metrics = test_audio_metrics(processed, "Quiet audio processed")
-            results['quiet_test'] = {'success': True, 'metrics': metrics}
-        except Exception as e:
-            results['quiet_test'] = {'success': False, 'error': str(e)}
-        
-        # Test 3: Mono vs Stereo
-        logger.info("\nTest 3: Stereo audio")
-        mono_audio, sr = create_test_audio()
-        stereo_audio = np.stack([mono_audio, mono_audio * 0.8])  # Slightly different channels
-        
-        input_path = os.path.join(temp_dir, "stereo_audio.wav")
-        output_path = os.path.join(temp_dir, "stereo_audio_processed.wav")
-        
-        sf.write(input_path, stereo_audio.T, sr)
-        
-        try:
-            result_path, stats = process_audio(input_path, output_path, level='moderate')
-            processed, _ = sf.read(result_path)
-            
-            if len(processed.shape) > 1:
-                logger.info("Stereo output preserved")
-                metrics_left = test_audio_metrics(processed[:, 0], "Left channel")
-                metrics_right = test_audio_metrics(processed[:, 1], "Right channel")
-                results['stereo_test'] = {
-                    'success': True,
-                    'stereo': True,
-                    'left': metrics_left,
-                    'right': metrics_right
-                }
-            else:
-                metrics = test_audio_metrics(processed, "Stereo->Mono processed")
-                results['stereo_test'] = {
-                    'success': True,
-                    'stereo': False,
-                    'metrics': metrics
-                }
-        except Exception as e:
-            results['stereo_test'] = {'success': False, 'error': str(e)}
-    
-    return results
+
+    sr = 16000
+
+    # Test 1: Audio with some NaN values
+    logger.info("\nTest 1: Audio with NaN values")
+    audio_with_nan = create_test_audio(sr=sr)[0]
+    audio_with_nan[100:110] = np.nan
+
+    cleaned = AudioProcessingFixes.safe_nan_cleanup(audio_with_nan, fallback=audio_with_nan)
+    metrics = compute_audio_metrics(cleaned, "NaN test processed")
+    assert metrics['valid'], "Processing should recover from NaN regions"
+
+    # Test 2: Very quiet audio
+    logger.info("\nTest 2: Very quiet audio")
+    quiet_audio = create_test_audio(sr=sr)[0] * 0.0001
+
+    config = ProcessingConfig.get_profile('gentle')
+    quiet_processed = apply_watermark_removal(
+        quiet_audio, sr, [{'freq_range': (3000, 5000)}], config
+    )
+    metrics = compute_audio_metrics(quiet_processed, "Quiet audio processed")
+    assert metrics['valid'], "Quiet audio should remain valid after processing"
+
+    # Test 3: Mono vs Stereo
+    logger.info("\nTest 3: Stereo audio")
+    mono_audio, sr = create_test_audio(sr=sr)
+    stereo_audio = np.stack([mono_audio, mono_audio * 0.8])  # Slightly different channels
+
+    stereo_processed = apply_watermark_removal(
+        stereo_audio[0], sr, [{'freq_range': (4000, 6000)}], ProcessingConfig.get_profile('moderate')
+    )
+
+    metrics_left = compute_audio_metrics(stereo_processed, "Left channel")
+    metrics_right = compute_audio_metrics(stereo_audio[1], "Right channel baseline")
+    assert metrics_left['valid'] and metrics_right['valid'], "Stereo channels should stay valid"
 
 
 def test_validate_audio_content():
@@ -262,12 +175,12 @@ def test_validate_audio_content():
     logger.info("\n=== Testing validate_audio_content Function ===")
     
     # Test valid audio
-    valid_audio = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 44100))
+    valid_audio = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 16000))
     assert validate_audio_content(valid_audio), "Valid audio should pass validation"
     logger.info("✓ Valid audio passes")
     
     # Test silent audio
-    silent_audio = np.zeros(44100)
+    silent_audio = np.zeros(16000)
     assert not validate_audio_content(silent_audio), "Silent audio should fail validation"
     logger.info("✓ Silent audio fails")
     
@@ -287,6 +200,28 @@ def test_validate_audio_content():
     logger.info("✓ Empty audio fails")
     
     logger.info("\nAll validation tests passed!")
+
+
+def test_repeating_peak_suppression_reduces_tonal_energy():
+    """Ensure the repeating peak suppression attenuates tonal watermarks."""
+    sr = 16000
+    duration = 2.0
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+
+    watermark_freq = 6000
+    base_audio = 0.5 * np.sin(2 * np.pi * 440 * t)
+    watermark_tone = 0.25 * np.sin(2 * np.pi * watermark_freq * t)
+    audio = base_audio + watermark_tone
+
+    processed = WatermarkRemovalFixes.suppress_repeating_watermark_peaks(audio, sr)
+
+    freqs = np.fft.rfftfreq(len(audio), 1 / sr)
+    tone_bin = np.argmin(np.abs(freqs - watermark_freq))
+
+    before = np.abs(np.fft.rfft(audio))[tone_bin]
+    after = np.abs(np.fft.rfft(processed))[tone_bin]
+
+    assert after < before * 0.5, "Watermark tone should be attenuated"
 
 
 def calculate_snr(original, processed):

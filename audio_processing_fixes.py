@@ -434,6 +434,67 @@ class WatermarkRemovalFixes:
         
         return AudioProcessingFixes.safe_stft_processing(audio, sr, process_stft)
 
+    @staticmethod
+    def suppress_repeating_watermark_peaks(
+        audio: np.ndarray,
+        sr: int,
+        max_peaks: int = 12,
+        attenuation_db: float = 14.0,
+    ) -> np.ndarray:
+        """Attenuate narrow repeating peaks often used by audio watermarks.
+
+        The method looks for frequency bins that remain consistently above the
+        broadband median energy, which is characteristic of tonal or whistle
+        marks used in synthetic audio watermarking. Those bins are gently
+        attenuated and dithered to avoid introducing new artifacts.
+
+        Args:
+            audio: Input audio signal.
+            sr: Sample rate.
+            max_peaks: Maximum number of suspicious peaks to attenuate.
+            attenuation_db: Amount of attenuation applied to each peak.
+
+        Returns:
+            Audio with reduced prominence of repeating spectral peaks.
+        """
+
+        def process_stft(stft, sample_rate):
+            magnitude = np.abs(stft)
+            phase = np.angle(stft)
+
+            # Average energy per bin highlights stationary tones.
+            mean_by_bin = magnitude.mean(axis=1)
+            median_level = np.median(mean_by_bin)
+
+            if median_level <= 0:
+                return stft
+
+            prominence = mean_by_bin - median_level
+            candidate_indices = np.argsort(prominence)[::-1]
+            peak_indices = [idx for idx in candidate_indices[:max_peaks] if prominence[idx] > 0]
+
+            if not peak_indices:
+                return stft
+
+            attenuation = 10 ** (-attenuation_db / 20)
+
+            for idx in peak_indices:
+                # Apply attenuation across a narrow band around each peak bin
+                lower = max(idx - 1, 0)
+                upper = min(idx + 2, magnitude.shape[0])
+
+                magnitude[lower:upper, :] *= attenuation
+
+                # Add low-level noise to avoid perfectly tonal residues
+                dither = np.random.randn(upper - lower, magnitude.shape[1]) * (attenuation / 100)
+                magnitude[lower:upper, :] += dither
+
+            return magnitude * np.exp(1j * phase)
+
+        processed = AudioProcessingFixes.safe_stft_processing(audio, sr, process_stft)
+
+        return AudioProcessingFixes.safe_nan_cleanup(processed, fallback=audio)
+
 
 class AudioQualityEnhancer:
     """Post-processing to enhance audio quality after watermark removal."""
