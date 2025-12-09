@@ -1282,16 +1282,25 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
     
     # Apply psychoacoustic watermark removal for high-frequency watermarks
     high_freq_watermarks = [
-        w.get('freq_range', [0, 0])[0] 
-        for w in watermarks 
+        w.get('freq_range', [0, 0])[0]
+        for w in watermarks
         if w.get('freq_range') and w['freq_range'][0] > 15000
     ]
-    
+
     if high_freq_watermarks:
         result = WatermarkRemovalFixes.psychoacoustic_watermark_removal(
             result, sr, high_freq_watermarks
         )
-    
+
+    # Suppress persistent narrowband peaks that resemble tonal watermarks
+    suppressed = WatermarkRemovalFixes.suppress_repeating_watermark_peaks(result, sr)
+    if AudioProcessingFixes.validate_audio_content(
+        suppressed, context="Repeating peak suppression"
+    ):
+        result = suppressed
+    else:
+        logger.warning("Repeating peak suppression failed validation; keeping prior result")
+
     # Validate result
     if not AudioProcessingFixes.validate_audio_content(result, context="Watermark removal"):
         logger.warning("Watermark removal failed validation, returning original")
