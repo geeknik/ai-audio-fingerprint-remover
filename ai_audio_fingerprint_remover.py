@@ -549,6 +549,9 @@ class ProcessingConfig:
     # Timing variations parameters
     timing_variation_range: float = 0.002  # Random variation range (reduced from 1% to 0.2%)
     segment_overlap_ratio: float = 0.5  # Overlap ratio for processing segments
+
+    # Analysis parameters
+    stft_size: int = 2048  # Shared STFT size for detection/suppression
     
     # General parameters
     enable_watermark_removal: bool = True
@@ -572,6 +575,7 @@ class ProcessingConfig:
                 phase_variance=0.002,  # Reduced
                 micro_dynamics_amount=0.0005,  # Reduced
                 timing_variation_range=0.001,  # ±0.1%
+                stft_size=1024,
                 enable_harmonic_adjustments=False,  # Skip most aggressive processing
             ),
             'moderate': cls(
@@ -586,6 +590,7 @@ class ProcessingConfig:
                 phase_variance=0.005,  # Reduced
                 micro_dynamics_amount=0.001,  # Reduced
                 timing_variation_range=0.002,  # ±0.2%
+                stft_size=2048,
             ),
             'aggressive': cls(
                 processing_level='aggressive',
@@ -599,6 +604,7 @@ class ProcessingConfig:
                 phase_variance=0.008,  # Reduced
                 micro_dynamics_amount=0.002,  # Reduced
                 timing_variation_range=0.004,  # ±0.4%
+                stft_size=2048,
             ),
             'extreme': cls(
                 processing_level='extreme',
@@ -612,6 +618,7 @@ class ProcessingConfig:
                 phase_variance=0.015,  # Reduced
                 micro_dynamics_amount=0.004,  # Reduced
                 timing_variation_range=0.008,  # ±0.8%
+                stft_size=4096,
             )
         }
         
@@ -1258,22 +1265,31 @@ def remove_spectral_watermarks(audio_path: str, output_path: str,
     return output_path, watermarks
 
 
-def apply_watermark_removal(audio: np.ndarray, sr: int, 
-                           watermarks: List[Dict[str, Any]], 
+def apply_watermark_removal(audio: np.ndarray, sr: int,
+                           watermarks: List[Dict[str, Any]],
                            config: ProcessingConfig) -> np.ndarray:
     """Apply filters to remove detected watermarks with enhanced safety."""
     if not config.enable_watermark_removal:
         return audio
     
     result = audio.copy()
-    
+
     # Group watermarks by frequency range
-    freq_ranges = []
+    freq_ranges: List[Tuple[float, float]] = []
     for watermark in watermarks:
         freq_range = watermark.get('freq_range')
         if freq_range and freq_range not in freq_ranges:
             freq_ranges.append(freq_range)
-    
+
+    # Auto-detect persistent tonal carriers if detectors did not supply
+    # explicit frequency hints. This helps catch simple tonal watermarks
+    # without over-attenuating broadband content.
+    if not freq_ranges:
+        detected = WatermarkRemovalFixes.detect_suspicious_tones(
+            audio, sr, n_fft=config.stft_size
+        )
+        freq_ranges.extend(detected)
+
     # Use conservative frequency removal
     if freq_ranges:
         result = WatermarkRemovalFixes.conservative_frequency_removal(
@@ -1282,16 +1298,25 @@ def apply_watermark_removal(audio: np.ndarray, sr: int,
     
     # Apply psychoacoustic watermark removal for high-frequency watermarks
     high_freq_watermarks = [
-        w.get('freq_range', [0, 0])[0] 
-        for w in watermarks 
+        w.get('freq_range', [0, 0])[0]
+        for w in watermarks
         if w.get('freq_range') and w['freq_range'][0] > 15000
     ]
-    
+
     if high_freq_watermarks:
         result = WatermarkRemovalFixes.psychoacoustic_watermark_removal(
             result, sr, high_freq_watermarks
         )
-    
+
+    # Suppress persistent narrowband peaks that resemble tonal watermarks
+    suppressed = WatermarkRemovalFixes.suppress_repeating_watermark_peaks(result, sr)
+    if AudioProcessingFixes.validate_audio_content(
+        suppressed, context="Repeating peak suppression"
+    ):
+        result = suppressed
+    else:
+        logger.warning("Repeating peak suppression failed validation; keeping prior result")
+
     # Validate result
     if not AudioProcessingFixes.validate_audio_content(result, context="Watermark removal"):
         logger.warning("Watermark removal failed validation, returning original")
