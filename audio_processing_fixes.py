@@ -466,6 +466,27 @@ class WatermarkRemovalFixes:
             mean_by_bin = magnitude.mean(axis=1)
             median_level = np.median(mean_by_bin)
 
+            # Avoid suppressing when the spectrum is effectively silent to reduce
+            # the risk of injecting noise into very quiet passages.
+            if median_level <= 0 or np.allclose(mean_by_bin, 0):
+                return stft
+
+            # Require bins to be both above the broadband floor and stable over
+            # time to avoid attacking transient content such as drums or speech
+            # plosives that briefly spike individual bins.
+            persistence_threshold = median_level * 1.2
+            above_floor = magnitude > persistence_threshold
+            persistence = above_floor.mean(axis=1)
+
+            prominence = mean_by_bin - median_level
+            # Require at least ~6 dB of headroom over the broadband median
+            min_prominence = median_level * (10 ** (6.0 / 20.0) - 1.0)
+            candidate_indices = np.argsort(prominence)[::-1]
+            peak_indices = [
+                idx
+                for idx in candidate_indices[:max_peaks]
+                if prominence[idx] > min_prominence and persistence[idx] > 0.6
+            ]
             if median_level <= 0:
                 return stft
 
@@ -485,6 +506,11 @@ class WatermarkRemovalFixes:
 
                 magnitude[lower:upper, :] *= attenuation
 
+                # Add low-level noise scaled to the local floor to avoid perfectly
+                # tonal residues without raising the noise floor unnecessarily.
+                local_floor = np.median(magnitude[lower:upper, :])
+                dither_scale = max(local_floor * 1e-3, attenuation / 200)
+                dither = np.random.randn(upper - lower, magnitude.shape[1]) * dither_scale
                 # Add low-level noise to avoid perfectly tonal residues
                 dither = np.random.randn(upper - lower, magnitude.shape[1]) * (attenuation / 100)
                 magnitude[lower:upper, :] += dither
@@ -494,6 +520,83 @@ class WatermarkRemovalFixes:
         processed = AudioProcessingFixes.safe_stft_processing(audio, sr, process_stft)
 
         return AudioProcessingFixes.safe_nan_cleanup(processed, fallback=audio)
+
+    @staticmethod
+    def detect_suspicious_tones(
+        audio: np.ndarray,
+        sr: int,
+        n_fft: int = 2048,
+        max_candidates: int = 8,
+        min_prominence_db: float = 6.0,
+        min_persistence: float = 0.6,
+    ) -> List[Tuple[float, float]]:
+        """Identify persistent tonal peaks that resemble watermark carriers.
+
+        The detector looks for frequency bins that stay above the broadband
+        median for most frames and exceed it by a configurable prominence. The
+        output ranges can be fed into notch filtering or STFT-based suppression.
+
+        Args:
+            audio: Input mono audio.
+            sr: Sample rate.
+            n_fft: FFT size for analysis.
+            max_candidates: Maximum number of tone ranges to return.
+            min_prominence_db: Minimum dB above the spectral median to consider.
+            min_persistence: Minimum fraction of frames a bin must stay above
+                the threshold to be considered persistent.
+
+        Returns:
+            List of (low_freq, high_freq) tuples for suspicious tones.
+        """
+
+        if len(audio) < n_fft:
+            return []
+
+        hop_length = n_fft // 4
+        stft = librosa.stft(audio, n_fft=n_fft, hop_length=hop_length)
+        magnitude = np.abs(stft)
+
+        if magnitude.size == 0:
+            return []
+
+        mean_by_bin = magnitude.mean(axis=1)
+        median_level = np.median(mean_by_bin)
+
+        if median_level <= 0:
+            return []
+
+        prominence = mean_by_bin - median_level
+        persistence_threshold = median_level * 10 ** (min_prominence_db / 20)
+        persistence = (magnitude > persistence_threshold).mean(axis=1)
+
+        candidate_indices = [
+            idx
+            for idx, prom in enumerate(prominence)
+            if prom > 0 and persistence[idx] >= min_persistence
+        ]
+
+        # Sort candidates by prominence descending
+        candidate_indices = sorted(candidate_indices, key=lambda idx: prominence[idx], reverse=True)
+        candidate_indices = candidate_indices[:max_candidates]
+
+        if not candidate_indices:
+            return []
+
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+        bin_width = freqs[1] - freqs[0]
+
+        ranges = []
+        for idx in candidate_indices:
+            center = freqs[idx]
+            # Skip DC and near-Nyquist bins where filtering is unstable
+            if center <= 20 or center >= sr / 2 - bin_width:
+                continue
+
+            lower = max(center - bin_width, 0.0)
+            upper = min(center + bin_width, sr / 2)
+            ranges.append((lower, upper))
+
+        return ranges
 
 
 class AudioQualityEnhancer:

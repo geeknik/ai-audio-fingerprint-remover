@@ -224,6 +224,40 @@ def test_repeating_peak_suppression_reduces_tonal_energy():
     assert after < before * 0.5, "Watermark tone should be attenuated"
 
 
+def test_suspicious_tone_detection_identifies_carrier():
+    """Detect persistent tonal carriers when no hints are provided."""
+    sr = 22050
+    duration = 1.5
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+
+    carrier_freq = 7200
+    base = 0.4 * np.sin(2 * np.pi * 330 * t)
+    watermark = 0.2 * np.sin(2 * np.pi * carrier_freq * t)
+    audio = base + watermark
+
+    detected = WatermarkRemovalFixes.detect_suspicious_tones(audio, sr, n_fft=1024)
+
+    assert detected, "Detector should find the injected carrier"
+
+    # Confirm the strongest detected range sits around the carrier
+    centers = [(low + high) / 2 for low, high in detected]
+    closest = min(centers, key=lambda c: abs(c - carrier_freq))
+    assert abs(closest - carrier_freq) < 200, "Detected carrier should be near injected tone"
+
+
+def test_peak_suppression_keeps_broadband_intact():
+    """Broadband noise should not be aggressively altered by suppression."""
+    sr = 16000
+    rng = np.random.default_rng(0)
+    audio = rng.normal(scale=0.1, size=sr)
+
+    processed = WatermarkRemovalFixes.suppress_repeating_watermark_peaks(audio, sr)
+
+    # High SNR indicates little unintended alteration
+    snr = calculate_snr(audio, processed)
+    assert snr > 20, f"Suppression should not harm broadband content (SNR={snr:.1f} dB)"
+
+
 def calculate_snr(original, processed):
     """Calculate Signal-to-Noise Ratio in dB."""
     # Ensure same length
