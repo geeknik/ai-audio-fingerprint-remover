@@ -1,3 +1,5 @@
+DEPRECATED 9 DEC 2025 in favor of https://github.com/geeknik/mmm.
+
 # AI Audio Fingerprint Remover
 
 A comprehensive Python tool to remove AI-generated fingerprints, watermarks, and metadata from audio files.
